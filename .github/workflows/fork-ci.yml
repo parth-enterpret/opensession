@@ -1,0 +1,29 @@
+# CI for this fork's own branches.
+#
+# Upstream's ci.yml runs on pull_request only, which never fires when work is
+# pushed straight to a branch here. This runs the same contributor gate on
+# push, so a commit that would break the deployed box is caught before the
+# box's autoupdate timer pulls it.
+name: fork-ci
+
+on:
+  push:
+    branches: ["poc/**", "feat/**"]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.0"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - name: Server module import hygiene
+        run: bun scripts/check-module-side-effects.ts
+      - name: Slack agent tests
+        run: bun test packages/core/opensession-server/src/agents/slack
