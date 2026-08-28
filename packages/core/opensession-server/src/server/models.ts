@@ -107,7 +107,10 @@ export function normalizeModelEffort(
 }
 
 export const DEFAULT_BRIDGE_PICKER_MODELS = [
-  "claude-fable-5",
+  // Fable is deliberately absent. It carries a weekly cap separate from the
+  // 5-hour window and is already excluded from fallback destinations, so an
+  // accidental pick spends the scarcest tier on routine work. Opus 5 is the
+  // default here.
   "claude-opus-5",
   "claude-sonnet-5",
   "claude-haiku-4-5",
