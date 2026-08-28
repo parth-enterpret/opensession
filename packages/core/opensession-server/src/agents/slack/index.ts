@@ -88,9 +88,13 @@ import {
   setSlackBotUserId,
   loadActiveSessionsOnStartup,
 } from "./state";
+import { SlackSocketMode } from "./socket-mode";
 
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || "";
+// Presence selects the transport, matching what the setup UI already infers in
+// src/frontend/lib/slack-setup.ts.
+const SLACK_APP_TOKEN = process.env.SLACK_APP_TOKEN || "";
 
 const slackEventInbox = new SlackEventInbox(
   `${SESSION_DIR}/event-inbox.json`,
@@ -533,6 +537,7 @@ export function slackOwnsGithubWebhookIntake(): boolean {
 
 export class SlackAgent implements AgentModule {
   name = "slack";
+  private socket: SlackSocketMode | null = null;
   getRoutes(): Map<string, (req: Request, url: URL) => Promise<Response>> {
     const routes = new Map<
       string,
@@ -813,6 +818,22 @@ export class SlackAgent implements AgentModule {
       console.warn("[slack] Failed to fetch Slack team info:", e);
     }
 
+    if (SLACK_APP_TOKEN) {
+      // Must follow auth.test above: dispatchSlackEvent reads slackBotUserId.
+      // Not awaited — startup() runs agents one at a time with no timeout, so a
+      // dial that hangs would hold up every agent behind this one.
+      this.socket = new SlackSocketMode({
+        appToken: SLACK_APP_TOKEN,
+        onEvent: dispatchSlackEvent,
+        onInteractive: (payload) => {
+          void dispatchSlackInteractive(payload).catch((error) => {
+            console.error("[slack] socket: interactive dispatch failed:", error);
+          });
+        },
+      });
+      this.socket.start();
+    }
+
     const pendingEvents = slackEventInbox.pendingCount();
     void slackEventInbox.start().catch((error) => {
       console.error("[slack] Failed to start durable event replay:", error);
@@ -825,6 +846,8 @@ export class SlackAgent implements AgentModule {
   }
 
   async shutdown(): Promise<void> {
+    await this.socket?.stop();
+    this.socket = null;
     slackEventInbox.stop();
     // A server restart must not masquerade as a person's Stop action. Keep the
     // queue head on disk and let startup continue it against the saved engine
@@ -857,13 +880,14 @@ export class SlackAgent implements AgentModule {
     return {
       status: "operational",
       agent: `${personaName()} (Slack)`,
-      transport: "http",
+      transport: this.socket ? "socket" : "http",
       activeSessions: activeSessions.size,
       activeQueues: sessionQueues.size,
       pendingInboundEvents: slackEventInbox.pendingCount(),
       inFlightInboundEvents: slackEventInbox.inFlightCount(),
       pendingQuestions: pendingAnswers.size,
       ...githubWebhookHealth,
+      ...(this.socket ? { socket: this.socket.status() } : {}),
       queueDetails,
     };
   }

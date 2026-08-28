@@ -5,18 +5,27 @@ The Slack agent lives in
 @-mentions into agent runs, keeps worktree-channel sessions, handles Block Kit
 actions and link unfurls, and supplies watched-channel events to automations.
 
-## Current transport support
+## Choose a transport
 
-The running server currently supports **HTTP Events API intake only**.
-`SlackAgent.getRoutes()` always registers `/slack/events` and `/slack/actions`,
-and its health response always reports `transport: "http"`. There is no Socket
-Mode client in the server.
+The server supports two ways to receive Slack events. Set `SLACK_APP_TOKEN` to
+use Socket Mode; leave it unset to use HTTP.
 
-The setup UI and manifest generator currently expose a Socket Mode choice and
-accept `SLACK_APP_TOKEN`, but the runtime never reads that token. Do not select
-Socket Mode or rely on an `xapp-…` token. Configure public ingress, select
-**HTTP**, and set `SLACK_SIGNING_SECRET`. An app token does not make the signing
-secret optional and does not remove the HTTP routes.
+**Socket Mode** suits an instance Slack cannot reach — a tailnet, a home
+network, a laptop. The server dials out to Slack and events arrive on that
+connection, so there is no public ingress, no inbound firewall rule, and no
+signing secret. Health reports `transport: "socket"`.
+
+**HTTP** suits an instance that already has a public HTTPS origin. Slack posts
+to `/slack/events` and `/slack/actions`, and `SLACK_SIGNING_SECRET` verifies
+every request. Health reports `transport: "http"`.
+
+Both transports deliver the same payloads to the same handlers. Routing,
+deduplication, the durable event inbox, and `ALLOWED_SLACK_USER_ID` behave
+identically.
+
+`getRoutes()` registers the HTTP routes under either transport. Without a
+signing secret they reject every request with 401, which is what a
+Socket-Mode-only instance wants.
 
 ## Set up the app
 
@@ -53,12 +62,13 @@ literal value `true` enables it; see
 | --- | --- | --- |
 | `ENABLE_SLACK_AGENT` | to enable by environment | Only the literal `true` enables Slack. When absent, `integrations.slack.enabled` decides |
 | `SLACK_BOT_TOKEN` | yes | Bot user token (`xoxb-…`) for the agent's Slack Web API calls. Missing or invalid credentials produce warnings and failed Slack operations rather than stopping the server |
-| `SLACK_SIGNING_SECRET` | yes | Verifies both HTTP endpoints. Missing or invalid signatures fail closed with 401; request timestamps must be within five minutes |
+| `SLACK_SIGNING_SECRET` | for HTTP | Verifies both HTTP endpoints. Missing or invalid signatures fail closed with 401; request timestamps must be within five minutes. Socket Mode does not need it: the connection itself authenticates the sender |
 | `ALLOWED_SLACK_USER_ID` | strongly recommended | Restricts ordinary DMs and mentions and sets the `isAdmin` gate for admin, session-control and human-ask tools. Unset means every sender admitted by routing is an admin |
 | `WORKTREE_HOOK_SECRET` | only for worktree hooks | Value callers send as `x-worktree-secret` to the two `/worktree/*` routes. Missing means every hook request is rejected with 403 |
 | `SLACK_MENTION_INTENT_MODEL` | no | Mention intent classifier; default `claude-haiku-4-5` |
 | `SCHEDULE_WHEN_MODEL` | no | Natural-language parser used by one-off scheduling tools; default `claude-haiku-4-5` |
-| `SLACK_APP_TOKEN` | do not use | Declared by the setup registry but not consumed by the runtime; it does not enable Socket Mode |
+| `SLACK_APP_TOKEN` | for Socket Mode | App-level token (`xapp-…`) with the `connections:write` scope. Its presence enables Socket Mode. Generate it under **Basic Information → App-Level Tokens** |
+| `SLACK_SOCKET_DEBUG_RECONNECTS` | no | Only the literal `true`. Asks Slack to cycle the socket every ~30 seconds to exercise the reconnect path. Never enable it in normal operation |
 
 The setup dialog manages the bot token, signing secret, allowed user and
 worktree-hook secret. It does not expose the two model overrides. Set those
