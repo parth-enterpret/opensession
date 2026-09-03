@@ -335,6 +335,59 @@ export async function discardRecoverableGithubRun(
   return true;
 }
 
+/**
+ * Wall clock one GitHub turn may burn before it is cancelled.
+ *
+ * Nothing else bounds it. PI_SDK_MAX_TURNS caps a single model response — pi
+ * drives the Claude Code SDK as a model *provider* — and pi's own agent loop
+ * has no step limit, so a model that keeps re-reading the same files just keeps
+ * going. On 2026-09-03 a mention on a 26-line diff spent 17 minutes and 103
+ * events re-reading the same two files, twice announced it was done and then
+ * carried on, and had to be killed by stopping the service. Overridable
+ * because a review of a genuinely large PR can legitimately run long.
+ */
+export function githubRunTimeoutMs(): number {
+  const n = Number(process.env.OPENSESSION_GITHUB_RUN_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+}
+
+const DEADLINE = Symbol("github-run-deadline");
+
+/**
+ * Yield a run's events until the source ends or `timeoutMs` elapses.
+ *
+ * The race is against the pending `next()`, not against each delivered event:
+ * a turn that stops emitting altogether never reaches a loop body, so a check
+ * inside the consumer could not bound it. `onExpire` cancels the engine; the
+ * abandoned source unwinds behind us rather than being drained, because
+ * draining a run that would not stop is what we are here to avoid.
+ */
+export async function* withRunDeadline<T>(
+  source: AsyncIterable<T>,
+  timeoutMs: number,
+  onExpire: () => void,
+): AsyncGenerator<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<typeof DEADLINE>((resolve) => {
+    timer = setTimeout(() => resolve(DEADLINE), timeoutMs);
+  });
+  const it = source[Symbol.asyncIterator]();
+  try {
+    for (;;) {
+      const next = await Promise.race([it.next(), expired]);
+      if (next === DEADLINE) {
+        onExpire();
+        void it.return?.().catch(() => {});
+        return;
+      }
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Run one headless turn for a PR behavior; returns the agent's accumulated text. */
 export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResult> {
   const bksId = bksIdFor(opts.prNumber, opts.kind, opts.ghRepo);
@@ -412,6 +465,8 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
   let engineSessionId = resumeFrom;
   let errorMsg = "";
   let recoveryUncertain = false;
+  let timedOut = false;
+  const timeoutMs = githubRunTimeoutMs();
 
   // Write the file before the engine boots, not on its first event: the run's
   // session link is already public by now (see announceGithubRun), and booting
@@ -514,7 +569,13 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
       });
     }
 
-    for await (const event of events) {
+    for await (const event of withRunDeadline(events, timeoutMs, () => {
+      timedOut = true;
+      console.error(
+        `[github-run] ${opts.kind} on PR #${opts.prNumber} hit the ${Math.round(timeoutMs / 1000)}s wall clock after ${Math.round((Date.now() - startedAt.getTime()) / 1000)}s; cancelling`,
+      );
+      void cancelAgentRun(bksId, engineSessionId, recoveredRun?.runKey);
+    })) {
       if (event.type === "init") {
         engineSessionId = event.sessionId || engineSessionId;
         if (event.provider) effectiveProvider = event.provider;
@@ -552,6 +613,11 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
   } catch (e: any) {
     errorMsg = e.message || String(e);
   }
+  // Last word, over whatever the cancelled engine managed to emit on its way
+  // out: without a named reason the behaviors post "Unknown error", or (mention)
+  // the half-finished narration, and the run reads as if it just gave up.
+  if (timedOut)
+    errorMsg = `Run exceeded its ${Math.round(timeoutMs / 1000)}s wall-clock limit and was cancelled`;
 
   await persist(engineSessionId);
   // An uncertain host still owns the turn. Settling the visible run or clearing

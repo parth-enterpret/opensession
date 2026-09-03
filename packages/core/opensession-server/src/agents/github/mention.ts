@@ -345,7 +345,11 @@ export async function runConversationalMention(
       author: authorForLogin(args.author), // attribute any commits to the person who asked
     });
 
-    const reply = finalSummary(result.text) || "(no reply produced)";
+    // A failed run's accumulated text is working narration, not an answer;
+    // posting it reads as a confident reply to a question nobody answered.
+    const reply = result.error
+      ? `errored: ${result.error}`
+      : finalSummary(result.text) || "(no reply produced)";
     const out = `${REPLY_MARKER}\n${reply}\n\n<sub>${link}</sub>`;
     if (args.kind === "review" && args.replyToId) {
       // Answer in the inline thread; the progress comment becomes a pointer to it.
@@ -448,7 +452,9 @@ async function runFollowupMention(
     author: authorForLogin(args.author), // attribute commits to the person who asked
   });
 
-  const reply = finalSummary(result.text) || "(no reply produced)";
+  const reply = result.error
+    ? `errored: ${result.error}`
+    : finalSummary(result.text) || "(no reply produced)";
   const out = `${REPLY_MARKER}\n${reply}\n\n<sub>${link}</sub>`;
   if (args.kind === "review" && args.replyToId) {
     const ok = await replyToReviewComment(prNumber, args.replyToId, out, ghRepo);
