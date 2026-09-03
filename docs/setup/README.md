@@ -44,7 +44,7 @@ flowchart LR
 
   clients --> http
   hooks -->|webhooks and OAuth| wh
-  agents -->|polling| hooks
+  agents -->|Socket Mode and polling| hooks
   http <--> kernel
   agents <--> kernel
   autos <--> kernel

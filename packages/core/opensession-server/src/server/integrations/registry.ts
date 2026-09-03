@@ -40,8 +40,18 @@ export type IntegrationEnv = {
   example?: string;
   /** Without this the integration cannot function at all. */
   required?: boolean;
+  /** Required only when another credential is absent. */
+  requiredWhen?: (present: (name: string) => boolean) => boolean;
   description: string;
 };
+
+/** Resolve conditional and unconditional credential requirements consistently. */
+export function envRequired(
+  env: IntegrationEnv,
+  present: (name: string) => boolean,
+): boolean {
+  return env.requiredWhen ? env.requiredWhen(present) : !!env.required;
+}
 
 export type IntegrationLink = {
   label: string;
@@ -144,9 +154,14 @@ export const INTEGRATIONS: IntegrationSpec[] = [
         description: "bot user token",
       },
       {
+        name: "SLACK_APP_TOKEN",
+        example: "xapp-",
+        description: "app-level token with connections:write for Socket Mode",
+      },
+      {
         name: "SLACK_SIGNING_SECRET",
-        required: true,
-        description: "signing secret that verifies Slack's event requests",
+        requiredWhen: (present) => !present("SLACK_APP_TOKEN"),
+        description: "signing secret for HTTP event requests",
       },
       {
         name: "ALLOWED_SLACK_USER_ID",

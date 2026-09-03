@@ -5,30 +5,48 @@ The Slack agent lives in
 @-mentions into agent runs, keeps worktree-channel sessions, handles Block Kit
 actions and link unfurls, and supplies watched-channel events to automations.
 
-## Transport
+## Choose a transport
 
-The server supports **HTTP Events API intake only**. `SlackAgent.getRoutes()`
-always registers `/slack/events` and `/slack/actions`, and its health response
-always reports `transport: "http"`. There is no Socket Mode client, so the
-setup dialog and generated manifest only describe an HTTP app: public ingress
-is required and `SLACK_SIGNING_SECRET` is always required. A leftover
-`SLACK_APP_TOKEN` in `~/.opensession.env` is ignored.
+The server supports two ways to receive Slack events. Set `SLACK_APP_TOKEN` to
+use Socket Mode; leave it unset to use HTTP.
+
+**Socket Mode** suits an instance Slack cannot reach — a tailnet, a home
+network, a laptop. The server dials out to Slack and events arrive on that
+connection, so there is no public ingress, no inbound firewall rule, and no
+signing secret. Health reports `transport: "socket"`.
+
+**HTTP** suits an instance that already has a public HTTPS origin. Slack posts
+to `/slack/events` and `/slack/actions`, and `SLACK_SIGNING_SECRET` verifies
+every request. Health reports `transport: "http"`.
+
+Both transports deliver the same payloads to the same handlers. Routing,
+deduplication, the durable event inbox, and `ALLOWED_SLACK_USER_ID` behave
+identically.
+
+`getRoutes()` registers the HTTP routes under either transport. Without a
+signing secret they reject every request with 401, which is what a
+Socket-Mode-only instance wants.
 
 ## Set up the app
 
-1. Configure an HTTPS origin under **Settings → Domains and ingress → Public callbacks**. It must route
+1. For HTTP only: configure an HTTPS origin under **Settings → Domains and ingress → Public callbacks**. It must route
    to the fail-closed gateway on `127.0.0.1:3860`; see
-   [Public ingress](install.md#public-ingress).
-2. Open **Settings → Integrations → Slack → Set up** and click
-   **Create Slack app**. The generated manifest comes from
+   [Public ingress](install.md#public-ingress). Socket Mode skips this step —
+   the setup dialog offers HTTP only once such an origin exists.
+2. Open **Settings → Integrations → Slack → Set up**, choose the transport, and
+   click **Create Slack app**. The generated manifest comes from
    `src/frontend/lib/slack-manifest.ts` and includes the bot scopes, bot event
-   subscriptions, interactivity, the two request URLs, the assistant surface,
-   and the public UI hostname used for session-link unfurls. The JSON is also
-   copyable for Slack's **App Manifest** page.
+   subscriptions, interactivity, the assistant surface, and the public UI
+   hostname used for session-link unfurls. HTTP adds the two request URLs;
+   Socket Mode sets `socket_mode_enabled` and omits them, because a Socket Mode
+   instance may have no reachable address to name. The JSON is also copyable
+   for Slack's **App Manifest** page.
 3. Create the app from that manifest and install it to the workspace.
-4. Copy the `xoxb-…` bot token from **OAuth & Permissions** and the signing
-   secret from **Basic Information** into the Open Session dialog. Set
-   `ALLOWED_SLACK_USER_ID` to the trusted operator's Slack member ID.
+4. Copy the `xoxb-…` bot token from **OAuth & Permissions** into the Open
+   Session dialog, plus the transport's own credential: the signing secret from
+   **Basic Information** for HTTP, or a `connections:write` app-level token
+   generated under **Basic Information → App-Level Tokens** for Socket Mode.
+   Set `ALLOWED_SLACK_USER_ID` to the trusted operator's Slack member ID.
 5. Enable Slack, save, and restart Open Session. Saving writes credentials and
    the explicit enable flag to `~/.opensession.env`; the loaded module and its
    process-level credentials change only after restart.
@@ -55,8 +73,8 @@ literal value `true` enables it; see
 | `SLACK_MENTION_INTENT_MODEL` | no                       | Mention intent classifier; default `claude-haiku-4-5`                                                                                                                      |
 | `SCHEDULE_WHEN_MODEL`        | no                       | Natural-language parser used by one-off scheduling tools; default `claude-haiku-4-5`                                                                                       |
 
-The setup dialog manages the bot token, signing secret, allowed user and
-worktree-hook secret. It does not expose the two model overrides. Set those
+The setup dialog manages the bot token, the transport credential, allowed user
+and worktree-hook secret. It does not expose the two model overrides. Set those
 directly in `~/.opensession.env` and restart.
 
 ## HTTP intake and routes

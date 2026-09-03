@@ -18,10 +18,9 @@
  *
  * Keep the scope list here in sync with docs/setup/slack.md — that doc derives
  * it from the actual `slackApiCall` sites, and this is the same list as data.
- *
- * The server only implements the HTTP Events API, so the manifest always
- * carries both request URLs and leaves Socket Mode off.
  */
+
+import type { SlackTransport } from "./slack-setup";
 
 /** Bot token scopes, grouped by what they buy — the same grouping the setup
  *  dialog renders as copyable chips, so there is one source for both. */
@@ -79,9 +78,10 @@ export const SLACK_BOT_EVENTS: string[] = [
 export interface SlackManifestOptions {
   /** Public UI base whose hostname Slack watches for session-link unfurls. */
   publicBaseUrl: string;
-  /** Instance webhook base, e.g. https://hooks.example.com. Slack POSTs
-   *  events and interactive payloads here, so it must be publicly reachable. */
+  /** Instance webhook base, e.g. https://hooks.example.com. Only used by the
+   *  HTTP transport; Socket Mode never needs a reachable webhook address. */
   webhookBaseUrl: string;
+  transport: SlackTransport;
   /** App and bot display name. Slack caps the app name at 35 characters and
    *  the bot display name at 80. */
   appName: string;
@@ -112,8 +112,21 @@ function publicHostname(publicBaseUrl: string): string {
  * JSON reads as "what this app needs" instead of a filled-in template.
  */
 export function buildSlackManifest(options: SlackManifestOptions) {
-  const { publicBaseUrl, webhookBaseUrl } = options;
+  const { publicBaseUrl, webhookBaseUrl, transport } = options;
   const appName = clampName(options.appName, 35);
+  const socket = transport === "socket";
+  const eventSubscriptions = socket
+    ? { bot_events: SLACK_BOT_EVENTS }
+    : {
+        request_url: eventsUrl(webhookBaseUrl),
+        bot_events: SLACK_BOT_EVENTS,
+      };
+  const interactivity = socket
+    ? { is_enabled: true }
+    : {
+        is_enabled: true,
+        request_url: actionsUrl(webhookBaseUrl),
+      };
   return {
     display_information: {
       name: appName,
@@ -138,15 +151,9 @@ export function buildSlackManifest(options: SlackManifestOptions) {
       scopes: { bot: SLACK_BOT_SCOPES },
     },
     settings: {
-      event_subscriptions: {
-        request_url: eventsUrl(webhookBaseUrl),
-        bot_events: SLACK_BOT_EVENTS,
-      },
-      interactivity: {
-        is_enabled: true,
-        request_url: actionsUrl(webhookBaseUrl),
-      },
-      socket_mode_enabled: false,
+      event_subscriptions: eventSubscriptions,
+      interactivity,
+      socket_mode_enabled: socket,
       org_deploy_enabled: false,
       token_rotation_enabled: false,
     },
