@@ -236,8 +236,17 @@ export const PI_PASSTHROUGH_BLOCK_REASON =
   "The result will be delivered in a future turn. " +
   "Do not retry, do not call additional tools, and do not generate further text. End your turn now.";
 
-/** The SDK still needs room for its hidden digest after the visible tool turn. */
-export const PI_SDK_MAX_TURNS = 8;
+/** Turn 1 is the visible tool turn; turn 2 is the hidden digest, which exists
+ *  because blocked tool calls count as a turn boundary. The bridge's number,
+ *  for the bridge's reason (anthropic-bridge.ts) — and every turn past it is
+ *  pure harm here. Once the checkpoint is frozen the digest branch is
+ *  discarded, but the SDK keeps invoking the model against a hook that now
+ *  answers "already handled by the client-facing turn". The model reads that
+ *  as broken tooling, switches strategies (read → git show → sed → cat) and
+ *  re-reads the same files until the budget is gone; two live sessions burned
+ *  170 and 74 rejected calls that way, and the NEXT Pi step blocks on this
+ *  query's drain the whole time. Eight turns funded that; two cannot. */
+export const PI_SDK_MAX_TURNS = 2;
 
 // ── pi messages → the bridge's Anthropic wire shape ──────────────────────────
 
@@ -969,6 +978,17 @@ async function* runSdkAttempt(
         if (!earlyStop.expected.has(captured[i].id)) captured.splice(i, 1);
       }
       emittedCaptures = Math.min(emittedCaptures, captured.length);
+      // Pi has its answer, so aborting the query here reads as free — it is
+      // not, and the reason is upstream in passthroughEarlyStop.ts: an
+      // iterator-observed assistant UUID is NOT a durability acknowledgement.
+      // A live PTY E2E saw the assistant message and its denials in the
+      // stream while NEITHER existed in the session JSONL after an immediate
+      // abort. The checkpoint only becomes resumable once the SDK's canonical
+      // result commits the transcript, which is what this drain waits for.
+      // Abort instead and every following turn takes the divergence path:
+      // fresh SDK session, whole conversation replayed, no cache reuse, tool
+      // results flattened to text — worse than the bounded digest below.
+      // PI_SDK_MAX_TURNS bounds the drain; it must not be skipped.
       finishCanonicalDrain = beginPiSdkCanonicalDrain(storeKey);
       clientDone = true;
       const usage = usageFromSdkResult(model, sdkUsage);

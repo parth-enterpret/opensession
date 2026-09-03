@@ -19,6 +19,7 @@ import { join } from "path";
 import {
   MAX_PI_SDK_SESSIONS,
   PI_PASSTHROUGH_BLOCK_REASON,
+  PI_SDK_MAX_TURNS,
   buildPiAnthropicModels,
   buildPiAnthropicProvider,
   IMAGE_ONLY_PROMPT,
@@ -510,6 +511,18 @@ describe("Pi passthrough durable checkpoint", () => {
       "This tool call has been forwarded to the client for execution."
     );
     expect(PI_PASSTHROUGH_BLOCK_REASON).toContain("End your turn now.");
+  });
+
+  test("funds one hidden digest turn and no more, matching the bridge", () => {
+    // Every turn past the digest is spent on a model that has been told its
+    // calls were "already handled by the client-facing turn" — it re-reads the
+    // same files until the budget is gone while the next Pi step waits on this
+    // query's drain. The bridge solved the same shape with 2; drift between
+    // the two is the regression, so assert against its literal rather than a
+    // second copy of the number.
+    expect(PI_SDK_MAX_TURNS).toBe(2);
+    const bridge = readFileSync(join(import.meta.dir, "anthropic-bridge.ts"), "utf8");
+    expect(bridge).toContain(`maxTurns: ${PI_SDK_MAX_TURNS},`);
   });
 
   test("settles only after every parallel call and retains its assistant UUID", () => {
