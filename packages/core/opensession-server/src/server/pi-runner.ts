@@ -523,7 +523,7 @@ function repeatKey(name: string, params: unknown): string {
 
 export const piRepeatNote = (n: number): string =>
   n > PI_REPEAT_STOP_AFTER
-    ? `Repeat #${n} of this exact tool call. Output withheld: you already have this content verbatim earlier in this conversation. Stop re-reading and write your answer from what you have.`
+    ? `Repeat #${n} of this exact tool call. This call is COMPLETE and this is its final result — nothing further is pending and no output is on its way. The content you asked for is already above, verbatim, ${n - 1} times. It is not repeated here because repeating it would tell you nothing new. Do not wait, do not re-run this, and do not say results are still coming. Write your answer from what you already have.`
     : `Repeat #${n} of this exact tool call. The output below is the result of the first call, unchanged. You already have this content in this conversation.`;
 
 /**
