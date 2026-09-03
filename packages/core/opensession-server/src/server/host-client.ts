@@ -52,6 +52,7 @@ import {
   shouldPersistModelSwitch,
   type ImageInput,
 } from "./run-events";
+import { transitionRunState } from "./run-state";
 import type { TranscriptEntry } from "./types";
 import { applyForwardedTranscriptStrict } from "./transcript-persistence";
 import { sameProcess } from "./process-identity";
@@ -610,6 +611,23 @@ async function spawnHostRun(
       // after absence is proven; uncertain launches must remain visibly busy.
       handle?.abandon();
       journalClear(spec.hostId);
+      // journalSet above already claimed the session for this hostId via
+      // run_registered. journalClear drops the record but settles nothing, so
+      // without this the kernel stays `running` behind a host that will never
+      // exist — and only a terminal event carrying THIS runKey can clear it.
+      // The in-process fallback below runs under a fresh key, so its claim and
+      // its turn_end are both rejected as stale and the session is wedged for
+      // good: every later run is refused, cancelled within a second, and
+      // yields no events. That is how PR #3 went dead-on-arrival for an hour
+      // (kernel row pinned to rh-01a067f8 from 15:51:55 across two restarts).
+      // Scoped by run_key, so if our run_registered lost the race we release
+      // nothing rather than stealing the session from whoever owns it.
+      try {
+        await transitionRunState(spec.osSessionId, "run_failed", {
+          run_key: spec.hostId,
+          source: "host_spawn_failed",
+        });
+      } catch {}
       unregisterRunToken(rpcToken);
       try {
         rmSync(dir, { recursive: true, force: true });

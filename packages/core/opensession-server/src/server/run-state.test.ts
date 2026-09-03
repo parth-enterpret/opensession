@@ -319,4 +319,53 @@ describe("transitionRunState (stateful wrapper)", () => {
 		await clearRunState(id);
 		expect(getRunState(id)).toBe("idle");
 	});
+
+	// A run host claims the session by run_registered before its launch is
+	// proven (spawnHostRun in host-client.ts). When the launch then fails, the
+	// claim must be released, or the session is owned forever by a host that
+	// never existed: only a terminal event carrying that same run_key can clear
+	// it, and the replacement run always has a different one.
+	describe("a failed host launch releases its claim", () => {
+		test("run_failed frees the session for the replacement run", async () => {
+			const id = sid();
+			try {
+				await transitionRunState(id, "run_registered", { run_key: "rh-dead" });
+				expect(getRunState(id)).toBe("running");
+
+				// What spawnHostRun's proven-absent cleanup now emits.
+				await transitionRunState(id, "run_failed", { run_key: "rh-dead" });
+				expect(getRunState(id)).toBe("failed");
+
+				// The in-process fallback runs under a fresh key; it must be admitted.
+				const rejected: Record<string, unknown>[] = [];
+				await transitionRunState(id, "run_registered", { run_key: "fallback" }, (e) => {
+					if (e.msg !== "run_state_transition") rejected.push(e);
+				});
+				expect(rejected).toEqual([]);
+				expect(getRunState(id)).toBe("running");
+			} finally {
+				await clearRunState(id);
+			}
+		});
+
+		test("the release is scoped to the claiming run_key", async () => {
+			const id = sid();
+			try {
+				await transitionRunState(id, "run_registered", { run_key: "rh-owner" });
+				const events: Record<string, unknown>[] = [];
+				await transitionRunState(id, "run_failed", { run_key: "rh-other" }, (e) =>
+					events.push(e),
+				);
+				// A losing claimant must not settle a session it does not own.
+				expect(events[0]).toMatchObject({
+					msg: "stale_run_registration_rejected",
+					current_run_id: "rh-owner",
+					rejected_run_id: "rh-other",
+				});
+				expect(getRunState(id)).toBe("running");
+			} finally {
+				await clearRunState(id);
+			}
+		});
+	});
 });
