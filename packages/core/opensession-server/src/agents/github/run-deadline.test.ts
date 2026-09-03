@@ -36,7 +36,7 @@ async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
 
 test("a run that never stops emitting is cut off at the deadline", async () => {
 	let expired = 0;
-	const events = await collect(withRunDeadline(forever(), 25, () => expired++));
+	const events = await collect(withRunDeadline(forever(), 25, () => { expired++; }));
 	expect(expired).toBe(1);
 	expect(events.length).toBeGreaterThan(0);
 });
@@ -44,7 +44,7 @@ test("a run that never stops emitting is cut off at the deadline", async () => {
 test("a run that goes silent is bounded too", async () => {
 	let expired = 0;
 	const started = Date.now();
-	const events = await collect(withRunDeadline(silent(), 25, () => expired++));
+	const events = await collect(withRunDeadline(silent(), 25, () => { expired++; }));
 	expect(expired).toBe(1);
 	expect(events).toEqual([]);
 	expect(Date.now() - started).toBeLessThan(5_000);
@@ -56,7 +56,7 @@ test("a run that finishes inside its budget is left alone", async () => {
 		yield "a";
 		yield "b";
 	}
-	expect(await collect(withRunDeadline(short(), 60_000, () => expired++))).toEqual(["a", "b"]);
+	expect(await collect(withRunDeadline(short(), 60_000, () => { expired++; }))).toEqual(["a", "b"]);
 	expect(expired).toBe(0);
 });
 

@@ -11,6 +11,7 @@ import { OPENSESSION_SESSIONS_DIR } from "../../server/paths";
 import { invalidateSessionsCache, recordRunOutcome, updateSessionFile } from "../../server/session-cache";
 import {
   cancelAgentRun,
+  cancelAgentRunToken,
   runAgent,
   resumeContinuationPrompt,
 } from "../../server/agent-runner";
@@ -307,16 +308,48 @@ export class GithubRunRecoveryUncertainError extends Error {
   }
 }
 
-async function discardGithubRunRecord(
+/**
+ * Stop the one superseded host, and nothing else on this PR.
+ *
+ * `bksIdFor` is deterministic, so every run for a PR+kind shares one
+ * osSessionId, and cancelAgentRun latches every pending token, live token and
+ * journal record filed under any id it is handed. Cancelling by the shared
+ * session id therefore hit whichever run owned the PR when the call reached
+ * its journal sweep — and because the call was not awaited, that could be a
+ * run started after the discard returned. On 2026-09-03 it was: the repair
+ * path that requested this discard launched its replacement review host one
+ * second later, the predecessor's cancel took the current-run projection away
+ * from it, and it ended with no terminal event on a PR that had done nothing
+ * wrong.
+ *
+ * `run.runKey` is the host's immutable dispatch id — its hostId, which
+ * resumeLocalHostRun above just registered as a cancellable control — and no
+ * successor ever reuses it, so cancelAgentRunToken reaches this host and only
+ * this host. Awaited rather than floated for the same reason the old call was
+ * wrong: a cancel still in flight after the discard returns can outlive the
+ * run it was aimed at. Scoped to one token it takes no journal-wide await, so
+ * awaiting costs the drain nothing.
+ *
+ * Deliberately not settling the session's run state: the runGithubAgent turn
+ * that owned this host settled it through recordRunOutcome when it returned.
+ * Re-settling here is the same mistake in a different shape — it would take
+ * the session away from whoever owns it now.
+ *
+ * `deps` is test seam only (same default-parameter idiom as journalSet).
+ */
+export async function discardGithubRunRecord(
   run: ActiveRunRecord,
-  bksId: string,
+  deps: {
+    resume?: typeof resumeLocalHostRun;
+    cancel?: (runToken: string) => Promise<unknown>;
+  } = {},
 ): Promise<void> {
-  const events = await resumeLocalHostRun(run, {});
+  const events = await (deps.resume ?? resumeLocalHostRun)(run, {});
   if (events === "uncertain") {
     throw new GithubRunRecoveryUncertainError(run.hostId || run.runKey);
   }
   if (events) {
-    void cancelAgentRun(bksId, run.claudeSessionId, run.runKey);
+    await (deps.cancel ?? cancelAgentRunToken)(run.runKey);
     for await (const _event of events) {}
   }
   journalClearIfLineage(run);
@@ -331,7 +364,7 @@ export async function discardRecoverableGithubRun(
   const bksId = bksIdFor(prNumber, kind, ghRepo);
   const run = recoverableGithubRun(activeRunRecords(), bksId, kind);
   if (!run) return false;
-  await discardGithubRunRecord(run, bksId);
+  await discardGithubRunRecord(run);
   return true;
 }
 
@@ -365,7 +398,7 @@ const DEADLINE = Symbol("github-run-deadline");
 export async function* withRunDeadline<T>(
   source: AsyncIterable<T>,
   timeoutMs: number,
-  onExpire: () => void,
+  onExpire: () => void | Promise<void>,
 ): AsyncGenerator<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<typeof DEADLINE>((resolve) => {
@@ -376,7 +409,10 @@ export async function* withRunDeadline<T>(
     for (;;) {
       const next = await Promise.race([it.next(), expired]);
       if (next === DEADLINE) {
-        onExpire();
+        // Awaited, not floated: a cancel still in flight when this turn ends
+        // lands on whoever owns the session next, which is exactly how the
+        // superseded-host discard used to kill its own replacement.
+        await onExpire();
         void it.return?.().catch(() => {});
         return;
       }
@@ -487,7 +523,7 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
       console.log(
         `[github-run] Discarding superseded ${opts.kind} host ${existingDetachedRun.hostId} for ${bksId}`,
       );
-      await discardGithubRunRecord(existingDetachedRun, bksId);
+      await discardGithubRunRecord(existingDetachedRun);
     }
 
     let events: AsyncIterable<StreamEvent>;
@@ -569,12 +605,12 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
       });
     }
 
-    for await (const event of withRunDeadline(events, timeoutMs, () => {
+    for await (const event of withRunDeadline(events, timeoutMs, async () => {
       timedOut = true;
       console.error(
         `[github-run] ${opts.kind} on PR #${opts.prNumber} hit the ${Math.round(timeoutMs / 1000)}s wall clock after ${Math.round((Date.now() - startedAt.getTime()) / 1000)}s; cancelling`,
       );
-      void cancelAgentRun(bksId, engineSessionId, recoveredRun?.runKey);
+      await cancelAgentRun(bksId, engineSessionId, recoveredRun?.runKey);
     })) {
       if (event.type === "init") {
         engineSessionId = event.sessionId || engineSessionId;
