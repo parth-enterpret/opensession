@@ -547,11 +547,30 @@ export const piRepeatNote = (n: number): string =>
  * counters: a re-read after your own edit is not a repeat at all. The
  * counters survive every other tool, which is what keeps a bash-only loop
  * detectable, and that is the exact loop being fixed.
+ *
+ * `bashIsPure` is the one exception, and it is not a relaxation: in ask mode
+ * every bash command has already passed askBashDenyReason, so the shell is
+ * provably read-only and re-running it can only spend wall clock. It was
+ * spending a lot of it — backend-monorepo #14877 re-executed one 405-line
+ * `git diff` three times and re-sent every byte, inside a run that then died
+ * on the 900 s cap. Known ceiling: the read-only allowlist also permits a few
+ * commands whose output moves on its own (`date`, `ps`, `systemctl status`),
+ * and a byte-identical repeat of one of those now answers from the first
+ * call. That repeat was already being reported as a loop, so the cache is not
+ * what makes it wrong; if a run ever needs to re-poll, it has to vary the
+ * command (it is the same key otherwise) rather than rely on re-execution.
+ *
+ * NOTE on what this guard does NOT do: it bounds how many times CONTENT is
+ * served, never how many times the model may CALL. A tool wrapper cannot stop
+ * a call from being emitted. The reviewer scorecard's "max repeat 7 against a
+ * ceiling of 4" is that distinction, not a leak — calls 5, 6 and 7 each got
+ * the note alone, which is the designed behavior.
  */
 const PI_PURE_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 export function piRepeatCallGuardTools(
-  tools: readonly ToolDefinition<any, any, any>[]
+  tools: readonly ToolDefinition<any, any, any>[],
+  opts: { bashIsPure?: boolean } = {},
 ): ToolDefinition<any, any, any>[] {
   // Per run: this factory runs once per run attempt, so the maps die with the
   // run instead of leaking one session's answers into the next.
@@ -560,7 +579,9 @@ export function piRepeatCallGuardTools(
   return tools.map((tool) => ({
     ...tool,
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const pureRead = PI_PURE_READ_TOOLS.has(tool.name);
+      const pureRead =
+        PI_PURE_READ_TOOLS.has(tool.name) ||
+        (opts.bashIsPure === true && tool.name === "bash");
       if (!pureRead) cached.clear();
       if (tool.name === "edit" || tool.name === "write") seen.clear();
 
@@ -2034,7 +2055,7 @@ async function* runPiAttempt(
     // Repeat guard sits INSIDE the steering wrapper: a call skipped because a
     // steer arrived never ran, so it must not count as a repeat.
     const customTools = piSteeringBoundaryTools(
-      piRepeatCallGuardTools(baseCustomTools),
+      piRepeatCallGuardTools(baseCustomTools, { bashIsPure: isAsk }),
       () => steeringBoundaryPending,
     );
 

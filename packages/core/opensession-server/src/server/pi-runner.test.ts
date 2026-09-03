@@ -239,6 +239,90 @@ describe("piRepeatCallGuardTools", () => {
     expect(text(reread)).toBe(`${piRepeatNote(2)}\nafter`);
   });
 
+  test("the ceiling bounds served content, not the number of calls", async () => {
+    // The reviewer scorecard read "max repeat 7 against a ceiling of 4" as a
+    // leak in this guard. It is not: a tool wrapper cannot stop a call from
+    // being emitted. Reconstructing the counts from two 7-repeat transcripts
+    // (backend-monorepo #14877, enterpret-showcase #12202) matched every
+    // "Repeat #n" the guard emitted, so nothing reset — the model simply kept
+    // asking, and calls 5-7 each cost one round trip and no execution.
+    let runs = 0;
+    const tools = piRepeatCallGuardTools([
+      tool("bash", () => {
+        runs += 1;
+        return { content: [{ type: "text", text: "diff" }], details: {} };
+      }),
+      tool("read", () => ({ content: [{ type: "text", text: "file" }], details: {} })),
+    ]);
+
+    const served: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      // Interleave a different call: only edit/write clear the counters, so
+      // this alternation must not reset anything (that is what keeps a
+      // bash-only loop detectable).
+      await tools[1].execute(`r${i}`, { path: "other.go" }, undefined, undefined, {} as any);
+      served.push(
+        text(await tools[0].execute(`c${i}`, { command: "git diff" }, undefined, undefined, {} as any)),
+      );
+    }
+
+    expect(served[6]).toBe(piRepeatNote(7));
+    expect(served[6]).not.toContain("diff");
+    // Calls past the ceiling do not execute, so they cost the deadline nothing
+    // beyond the model round trip that emitted them.
+    expect(runs).toBe(PI_REPEAT_STOP_AFTER);
+  });
+
+  test("a write resets the counters — the only reset there is, and ask mode has no write", async () => {
+    let runs = 0;
+    const tools = piRepeatCallGuardTools([
+      tool("bash", () => {
+        runs += 1;
+        return { content: [{ type: "text", text: "diff" }], details: {} };
+      }),
+      tool("write", () => ({ content: [{ type: "text", text: "wrote" }], details: {} })),
+    ]);
+    const call = (i: number) =>
+      tools[0].execute(`c${i}`, { command: "git diff" }, undefined, undefined, {} as any);
+
+    for (let i = 0; i < 4; i++) await call(i);
+    await tools[1].execute("w", { path: "notes.md" }, undefined, undefined, {} as any);
+    // Seven identical calls, but the counter restarted at the write, so the
+    // last one reads as #3 and is still served content.
+    for (let i = 4; i < 7; i++) await call(i);
+    expect(text(await call(7))).toContain(piRepeatNote(4));
+    // A review runs mode "ask", whose local tools are read/grep/find/ls/bash
+    // (pi-runner's localTools) — no edit, no write, so no run that produced
+    // those transcripts could have taken this path.
+    expect(runs).toBe(PI_REPEAT_STOP_AFTER * 2);
+  });
+
+  test("ask mode serves a repeated bash read from cache instead of re-running it", async () => {
+    let runs = 0;
+    const [bash] = piRepeatCallGuardTools(
+      [
+        tool("bash", () => {
+          runs += 1;
+          return { content: [{ type: "text", text: `diff ${runs}` }], details: {} };
+        }),
+      ],
+      { bashIsPure: true },
+    );
+    const args = { command: "git diff a..b" };
+
+    expect(text(await bash.execute("a", args, undefined, undefined, {} as any))).toBe("diff 1");
+    expect(text(await bash.execute("b", args, undefined, undefined, {} as any))).toBe(
+      `${piRepeatNote(2)}\ndiff 1`,
+    );
+    expect(text(await bash.execute("c", args, undefined, undefined, {} as any))).toBe(
+      `${piRepeatNote(3)}\ndiff 1`,
+    );
+    // Every bash command in ask mode has already passed askBashDenyReason, so
+    // re-running a 405-line `git diff` twice only spends the wall clock the
+    // 900 s cap then killed the run for.
+    expect(runs).toBe(1);
+  });
+
   test("a repeated failing call carries the repeat note on the error", async () => {
     const [bash] = piRepeatCallGuardTools([
       tool("bash", () => {

@@ -71,3 +71,20 @@ test("the limit defaults to 15 minutes and takes a positive override", () => {
 		expect(githubRunTimeoutMs()).toBe(15 * 60 * 1000);
 	}
 });
+
+test("the limit scales with the diff, between a floor and a ceiling", () => {
+	delete process.env.OPENSESSION_GITHUB_RUN_TIMEOUT_MS;
+	// Small PRs keep exactly the budget the flat default gave them.
+	expect(githubRunTimeoutMs(0)).toBe(15 * 60 * 1000);
+	expect(githubRunTimeoutMs(68)).toBe(15 * 60 * 1000 + 68 * 2_500);
+	// The sizes the flat 900 s cap killed now get room: the 411-line run that
+	// finished needed 890 s, and 362 lines is inside the same band.
+	expect(githubRunTimeoutMs(362)).toBeGreaterThan(890_000 * 2);
+	expect(githubRunTimeoutMs(692)).toBeGreaterThan(900_000);
+	// A 10 000-line PR cannot run forever.
+	expect(githubRunTimeoutMs(10_000)).toBe(45 * 60 * 1000);
+	// The override is absolute, not a floor: no scaling on top of it.
+	process.env.OPENSESSION_GITHUB_RUN_TIMEOUT_MS = "60000";
+	expect(githubRunTimeoutMs(10_000)).toBe(60_000);
+	delete process.env.OPENSESSION_GITHUB_RUN_TIMEOUT_MS;
+});

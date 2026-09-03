@@ -261,6 +261,9 @@ export interface GithubRunOpts {
   title: string;
   /** Resume the prior engine conversation for this PR+behavior if one exists. */
   resume?: boolean;
+  /** Changed lines (additions + deletions) this turn has to get through, for
+   *  the wall-clock budget. Omitted = the floor. */
+  changedLines?: number;
   /** Run this turn in a detached host so it survives a service restart. */
   detached?: boolean;
   /** Reattach the detached turn left by this behavior's persisted recovery marker. */
@@ -368,6 +371,14 @@ export async function discardRecoverableGithubRun(
   return true;
 }
 
+/** Floor: what every run gets regardless of size, and what a run with no
+ *  known diff size gets. Unchanged from the flat default it replaces. */
+export const GITHUB_RUN_TIMEOUT_FLOOR_MS = 15 * 60 * 1000;
+/** Added per changed line (additions + deletions). */
+export const GITHUB_RUN_TIMEOUT_PER_LINE_MS = 2_500;
+/** Hard stop, so a 10 000-line PR cannot hold a host all afternoon. */
+export const GITHUB_RUN_TIMEOUT_CEILING_MS = 45 * 60 * 1000;
+
 /**
  * Wall clock one GitHub turn may burn before it is cancelled.
  *
@@ -376,12 +387,30 @@ export async function discardRecoverableGithubRun(
  * has no step limit, so a model that keeps re-reading the same files just keeps
  * going. On 2026-09-03 a mention on a 26-line diff spent 17 minutes and 103
  * events re-reading the same two files, twice announced it was done and then
- * carried on, and had to be killed by stopping the service. Overridable
- * because a review of a genuinely large PR can legitimately run long.
+ * carried on, and had to be killed by stopping the service.
+ *
+ * The budget scales with the diff because review cost does. Measured over five
+ * clean review runs (reviewer scorecard, 2026-09-03): 26 lines → 18 s, 68 →
+ * 183 s, 411 → 890 s with 10 s to spare, and 362 / 372 / 692 all still working
+ * when the flat 900 s cap killed them. The only large run that finished spent
+ * ~2.2 s per changed line, and that is a LOWER bound — the three that died had
+ * not finished at their own 2.5 s/line. So: 2.5 s per changed line on top of
+ * the old 15-minute floor, which gives the 362-line case ~30 min (about twice
+ * what the comparable 411-line success needed) and leaves every PR under ~100
+ * lines on exactly the budget it has today. The corpus median is ~382 lines,
+ * i.e. squarely in the band the flat default was failing.
+ *
+ * The env var stays an absolute override, not a floor: an operator setting it
+ * means that number and no scaling.
  */
-export function githubRunTimeoutMs(): number {
+export function githubRunTimeoutMs(changedLines?: number): number {
   const n = Number(process.env.OPENSESSION_GITHUB_RUN_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? n : 15 * 60 * 1000;
+  if (Number.isFinite(n) && n > 0) return n;
+  const lines = Number.isFinite(changedLines) && changedLines! > 0 ? changedLines! : 0;
+  return Math.min(
+    GITHUB_RUN_TIMEOUT_FLOOR_MS + lines * GITHUB_RUN_TIMEOUT_PER_LINE_MS,
+    GITHUB_RUN_TIMEOUT_CEILING_MS,
+  );
 }
 
 const DEADLINE = Symbol("github-run-deadline");
@@ -502,7 +531,7 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
   let errorMsg = "";
   let recoveryUncertain = false;
   let timedOut = false;
-  const timeoutMs = githubRunTimeoutMs();
+  const timeoutMs = githubRunTimeoutMs(opts.changedLines);
 
   // Write the file before the engine boots, not on its first event: the run's
   // session link is already public by now (see announceGithubRun), and booting

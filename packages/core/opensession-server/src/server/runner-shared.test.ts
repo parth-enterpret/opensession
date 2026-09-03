@@ -349,9 +349,8 @@ describe("askBashDenyReason", () => {
     expect(reason).toContain("read-only allowlist");
     expect(askBashDenyReason("git push")).not.toBeNull();
     expect(askBashDenyReason("git add .")).not.toBeNull();
-    // sed stays denied even in -n form (see the allowlist's own note).
-    expect(askBashDenyReason("sed -n 1,5p file")).not.toBeNull();
     expect(askBashDenyReason("python3 -c 'print(1)'")).not.toBeNull();
+    expect(askBashDenyReason("awk '{print $1}' file")).not.toBeNull();
     expect(askBashDenyReason("gh api repos/o/r -X POST")).not.toBeNull();
     expect(askBashDenyReason("systemctl restart opensession")).not.toBeNull();
   });
@@ -370,6 +369,42 @@ describe("askBashDenyReason", () => {
     expect(askBashDenyReason("echo hi > /tmp/f")).toContain("redirection");
     expect(askBashDenyReason("cat a >> b")).toContain("redirection");
     expect(askBashDenyReason("cmd &> log.txt")).toContain("redirection");
+  });
+
+  test("sed is allowed for line-range printing and nothing else", () => {
+    // The spellings measured reviews were denied (reviewer scorecard §2).
+    expect(askBashDenyReason("sed -n '1240,1420p' code/oracle/service.py")).toBeNull();
+    expect(askBashDenyReason("sed -n '1,60p' src/pages/api/list-integrations.js")).toBeNull();
+    expect(askBashDenyReason("git show HEAD:f.py | sed -n '290,345p'")).toBeNull();
+    expect(askBashDenyReason('sed -n "1,$p" f')).toBeNull();
+    expect(askBashDenyReason("sed -n 1,5p file")).toBeNull();
+    // Every write spelling needs a character the script class does not carry.
+    expect(askBashDenyReason("sed -n -i 's/a/b/' f")).not.toBeNull();
+    expect(askBashDenyReason("sed -n '1,5w /tmp/out' f")).not.toBeNull();
+    expect(askBashDenyReason("sed -n '1e rm -rf /' f")).not.toBeNull();
+    expect(askBashDenyReason("sed -n '1r /etc/passwd' f")).not.toBeNull();
+    expect(askBashDenyReason("sed -i 's/a/b/' f")).not.toBeNull();
+    expect(askBashDenyReason("sed -n -f script.sed f")).not.toBeNull();
+  });
+
+  test("sort is allowed as a filter but not as a writer", () => {
+    expect(askBashDenyReason("grep -rl x src | sort -u")).toBeNull();
+    expect(askBashDenyReason("sort")).toBeNull();
+    expect(askBashDenyReason("sort -u a b")).toBeNull();
+    expect(askBashDenyReason("sort -o out.txt in.txt")).not.toBeNull();
+    expect(askBashDenyReason("sort -oout.txt in.txt")).not.toBeNull();
+    expect(askBashDenyReason("sort --output=out.txt in.txt")).not.toBeNull();
+  });
+
+  test("git global options are stripped before matching, as git itself does", () => {
+    expect(askBashDenyReason("git --no-pager show HEAD:f.tsx")).toBeNull();
+    expect(askBashDenyReason("git -C /repo show HEAD:f.tsx")).toBeNull();
+    expect(askBashDenyReason("git -c core.pager=cat log --oneline")).toBeNull();
+    expect(askBashDenyReason("git ls-tree HEAD -- src/f.tsx")).toBeNull();
+    // Stripping the options must not smuggle a write verb through.
+    expect(askBashDenyReason("git --no-pager push")).not.toBeNull();
+    expect(askBashDenyReason("git -C /repo commit -m x")).not.toBeNull();
+    expect(askBashDenyReason("git --no-pager diff --output=/tmp/f")).not.toBeNull();
   });
 
   test("quoting does not hide separators or unquote them wrongly", () => {

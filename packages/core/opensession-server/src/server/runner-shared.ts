@@ -490,7 +490,7 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   // and review agents routinely chain `… && git rev-parse HEAD` — the previous runner
   // evaluates each sub-command, so an unlisted rev-parse denied the whole line.
   "git rev-parse*": "allow", "git cat-file*": "allow", "git describe*": "allow",
-  "git merge-base*": "allow",
+  "git merge-base*": "allow", "git ls-tree*": "allow",
   // `git remote` with no verb (or -v) prints the remotes from local config,
   // and get-url reads that same file — the "which repo/fork is this" question
   // a review asks before it reads a diff. NOT add/set-url/rename/remove
@@ -505,11 +505,20 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   // Read-only stdout filters — the usual tails on allowed git/gh reads
   // (`git show X:f | nl -ba`, `… | cut -d…`); an unlisted filter denies the
   // whole pipeline (each sub-command is evaluated, see rev-parse note).
-  // Deliberately NOT sort/uniq (`sort -o FILE` and `uniq in out` both write
-  // files) and not awk/perl (arbitrary code; sed's exclusion is noted below).
+  // Deliberately NOT awk/perl (arbitrary code: `system()`, `print | "sh"`,
+  // `print > f`; sed's narrow exception is noted below).
   "nl": "allow", "nl *": "allow", "cut *": "allow", "tr *": "allow",
   "comm *": "allow", "column": "allow", "column *": "allow",
   "diff *": "allow", "sha256sum*": "allow", "md5sum*": "allow",
+  // `sort` writes ONLY through an output path: `sort -o FILE`, the attached
+  // `sort -oFILE`, and `sort --output=FILE`. Allow the filter, deny the output
+  // flag on the substring — deliberately blunt, same as `gh api*-f*`: a path
+  // that merely contains "-o" is refused too, which costs a rare read that
+  // `| cat` already answers and leaves no spelling of the write unguarded.
+  // (`uniq` stays denied: its SECOND operand is an output file, and no glob
+  // here can count operands. `sort -u` covers what a review needs it for.)
+  "sort": "allow", "sort *": "allow",
+  "sort*-o*": "deny", "sort*--output*": "deny",
   // Exact spelling, no trailing glob: `git hash-object --stdin*` would also
   // match `--stdin -w`, which writes the object into .git.
   "git hash-object --stdin": "allow",
@@ -518,10 +527,11 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   // Read-only by construction: it wraps `gh pr checks` with a short-lived
   // read-only App installation token.
   [`bun ${GH_CHECKS_CLI_PATH} *`]: "allow",
-  // NOTE: sed stays denied even as `sed -n` — "sed -n *" also matches
-  // `sed -n -i …` (in-place edit) and scripts with the `w /path` write
-  // command, so no sed glob is actually read-only. Use head/tail/cat/rg
-  // for line ranges instead.
+  // NOTE: sed has no entry here on purpose — "sed -n *" also matches
+  // `sed -n -i …` (in-place edit) and scripts carrying the `w /path`, `r`,
+  // `R` or `e` commands, so no sed GLOB is read-only. The one provably safe
+  // spelling is carved out by SED_PRINT_RANGE below instead, where the script
+  // can be constrained character by character rather than by a wildcard.
   // Read-only GitHub inspection (PR-backlog digests, review triage). Only the
   // non-mutating `gh pr`/`gh run` read verbs — NOT bare "gh *" (that would
   // allow pr create/merge/close/comment, run rerun/cancel/delete) and NOT
@@ -559,11 +569,38 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
 // an ask-mode bash command.
 let askBashRules: Array<{ re: RegExp; value: "allow" | "deny" }> | null = null;
 
+/**
+ * `sed -n` restricted to line-address printing, the one sed spelling that is
+ * read-only by construction rather than by wildcard.
+ *
+ * The script is constrained CHARACTER BY CHARACTER to digits, `$`, `,`, `;`,
+ * whitespace and `p`. Every sed command that touches the filesystem or the
+ * shell needs a letter outside that set — `w`/`W` (write), `r`/`R` (read a
+ * file in), `e` (execute), `s///w`, and the `-i` / `--in-place` / `-f` flags
+ * all fail the match — so no widening of the character class is safe without
+ * re-deriving this. Line ranges are what reviews actually ask for
+ * (`sed -n '1240,1420p' service.py`), and denying them cost a review the file
+ * that held the defect (reviewer scorecard, ml-monorepo #2165).
+ */
+const SED_PRINT_RANGE = /^sed +-n +(?:'[\d,$;p\s]+'|"[\d,$;p\s]+"|[\d,$;p]+)(?: +\S+)*$/;
+
+/**
+ * Git reads its own global options before the subcommand, and so must this.
+ * `git --no-pager show X`, `git -C <dir> show X` and `git -c k=v log` are the
+ * same reads as `git show` / `git log`, but matched literally they fall
+ * through every `git <verb>*` rule onto the catch-all deny — three wasted
+ * turns in one measured review. Strip only the option forms git itself
+ * accepts here; anything left (an alias, a `!shell` alias body) still has to
+ * match a verb rule on its own.
+ */
+const GIT_GLOBAL_OPTS =
+  /^git +(?:(?:--no-pager|--paginate|--no-replace-objects|--bare|--literal-pathspecs|--no-optional-locks) +|-C +\S+ +|-c +\S+ +|--git-dir=\S+ +|--work-tree=\S+ +|--namespace=\S+ +)+/;
+
 /** Last-match-wins over insertion order: the exact evaluation the previous runner's
  *  Permission.evaluate applies to these same rules (a findLast with no
  *  specificity ranking), so the two engines cannot drift on what a pattern
  *  means. `*` matches any run of characters, everything else is literal. */
-function askBashVerdict(segment: string): "allow" | "deny" {
+function askBashVerdict(rawSegment: string): "allow" | "deny" {
   if (!askBashRules) {
     const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     askBashRules = Object.entries(ASK_BASH_PERMISSIONS).map(([pattern, value]) => ({
@@ -571,8 +608,12 @@ function askBashVerdict(segment: string): "allow" | "deny" {
       value,
     }));
   }
+  const segment = rawSegment.replace(GIT_GLOBAL_OPTS, "git ");
   let verdict: "allow" | "deny" = "deny";
   for (const rule of askBashRules) if (rule.re.test(segment)) verdict = rule.value;
+  // Carved out after the table, not in it: the table's only matcher is `*`,
+  // which cannot express "these characters and no others".
+  if (verdict === "deny" && SED_PRINT_RANGE.test(segment)) return "allow";
   return verdict;
 }
 
@@ -594,8 +635,10 @@ export function askBashDenyReason(command: string): string | null {
   const REFUSE =
     "Read-only ask mode: bash is limited to a read-only allowlist (file, git, gh and system reads). " +
     "Writes, network fetches, installs and interpreters are refused, and no alternate spelling gets past " +
-    "this — do not retry the same command another way. Reads that work: cat/head/tail/ls/rg/grep/find/wc/jq, " +
-    "git status|log|show|diff|blame|ls-files|rev-parse|remote -v, gh pr view|list|checks, gh api (GET only). " +
+    "this — do not retry the same command another way. Reads that work: cat/head/tail/ls/rg/grep/find/wc/jq/nl/cut/sort, " +
+    "sed -n '120,240p' FILE (line ranges only — no other sed script is allowed), " +
+    "git status|log|show|diff|blame|ls-files|ls-tree|rev-parse|remote -v, gh pr view|list|checks, gh api (GET only). " +
+    "awk, perl and python are refused outright as arbitrary code; use sed -n, nl -ba or cat -n for numbered line ranges. " +
     "The code under review is already checked out here, so read it from the worktree. " +
     "If the answer truly needs the denied command, finish without it and say so in your verdict.";
   const segments: string[] = [];

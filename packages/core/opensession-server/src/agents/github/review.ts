@@ -473,6 +473,7 @@ export async function runReview(
         resume: false,
         detached: true,
         recoverDetached: sameHeadRecovery || legacyRecovery,
+        changedLines: details.additions + details.deletions,
       });
       if (finalResult.uncertain) {
         preserveRecovery = true;
@@ -483,10 +484,18 @@ export async function runReview(
 
     if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
     let parsed = parseReviewOutput(finalResult.text, cwd);
+    // A repair turn can only re-express what the first turn already produced.
+    // When that turn emitted nothing at all, the repair resumes an engine
+    // session with no inspection in it and the model says so, at length, in
+    // ~35 s — "No prior inspection artifacts (diffs, findings, or tool
+    // outputs) are present in this conversation to synthesize". That output
+    // then reads as a completed review of the PR, which it is not. A run that
+    // said nothing is not repairable; report it as the failure it is.
+    const producedNothing = !finalResult.error && !finalResult.text.trim();
     // Fable occasionally declares a progress narration complete before it emits
     // the review contract. Give the same engine session one bounded chance to
     // turn its completed inspection into a postable verdict.
-    if (!finalResult.error && !isCompleteReviewOutput(parsed)) {
+    if (!finalResult.error && !producedNothing && !isCompleteReviewOutput(parsed)) {
       if (isShuttingDown()) {
         preserveRecovery = true;
         console.log(`[github] PR #${pr.number} review repair parked for restart`);
@@ -519,9 +528,11 @@ export async function runReview(
     }
     const reviewError =
       finalResult.error ||
-      (isCompleteReviewOutput(parsed)
-        ? undefined
-        : "The review did not produce the required structured verdict after one continuation.");
+      (producedNothing
+        ? "The review turn ended without producing any output; nothing was inspected."
+        : isCompleteReviewOutput(parsed)
+          ? undefined
+          : "The review did not produce the required structured verdict after one continuation.");
     const tob = await testOnBase;
     const secrets = await secretScan;
     if (cancellationRequested()) return finishCancelled(placeholderId || undefined);

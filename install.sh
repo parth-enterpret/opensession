@@ -414,6 +414,21 @@ require_tool curl curl "downloading Bun"
 require_tool git git "cloning the source"
 good "git $(git --version | awk '{print $3}')"
 
+# The Grep tool shells out to `rg` and has no fallback: without ripgrep every
+# Grep call an agent makes fails with "ripgrep (rg) is not available on this
+# host". That is silent from the outside — the agent just loses codebase
+# search and works from the diff alone (measured: 100% of Grep calls failed
+# across five PR reviews on 2026-09-03). Best-effort, not required: a box with
+# no passwordless sudo still installs, it just searches worse.
+if ! command -v rg >/dev/null 2>&1; then
+  muted "installing ripgrep (the agents' Grep tool) ..."
+  if install_package ripgrep && command -v rg >/dev/null 2>&1; then
+    good "ripgrep installed"
+  else
+    warn "ripgrep is missing — the Grep tool will fail on every call. Install it and restart."
+  fi
+fi
+
 # Bun's own installer shells out to unzip. On a box with neither unzip nor
 # passwordless sudo (minimal containers, locked-down hosts, an EC2 image whose
 # default user was overridden) that is a dead end — so fall back to Python's
