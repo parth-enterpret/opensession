@@ -12,6 +12,7 @@ import {
 	getAllSessionsAsync,
 	readNativeSession,
 	readNativeSessionListRow,
+	readSlackSession,
 	type SessionArchiveSlice,
 } from "./sessions";
 import {
@@ -499,12 +500,32 @@ export function stopSessionOwnershipWatchdog(): void {
 	ownershipWatchdog.timer = undefined;
 }
 
+/**
+ * A Slack session no list projection can have observed yet.
+ *
+ * The Slack loop writes its session file and posts the "Open in Open Session"
+ * link (slack-<channel>-<ts>) in the same breath, so the deep link is followed
+ * inside the window where the list index has the row but every cached list
+ * snapshot on top of it predates the write. Reading the file directly closes
+ * that window, exactly as readNativeSession does for a native id.
+ *
+ * Only while the session has no engine id. From its first run onward it can be
+ * deduplicated into another source's row, and only the merged scan knows which
+ * row won and which id survives as an alias.
+ */
+function unmergedSlackSession(sessionId: string): UnifiedSession | undefined {
+	const session = readSlackSession(sessionId);
+	return session && !session.claudeSessionId && !session.codexThreadId
+		? session
+		: undefined;
+}
+
 export function findSession(sessionId: string): UnifiedSession | undefined {
 	// Native ids map directly to the one session file we own. Detail and run
 	// paths should not depend on a materialized list snapshot having observed a
 	// newly created session, and they should never scan the list to open one.
-	const native = readNativeSession(sessionId);
-	if (native) return enrichSessionRuntime([native])[0];
+	const owned = readNativeSession(sessionId) ?? unmergedSlackSession(sessionId);
+	if (owned) return enrichSessionRuntime([owned])[0];
 	return getCachedSessions().find(
 		(s) => s.id === sessionId || s.aliasIds?.includes(sessionId),
 	);
@@ -517,8 +538,8 @@ export async function findSessionAsync(
 	// link and its transcript watch open while the sidebar's cold list scan runs
 	// in parallel. External and historical alias ids still need the full merged
 	// scan because only that scan knows which source won deduplication.
-	const native = readNativeSession(sessionId);
-	if (native) return enrichSessionRuntime([native])[0];
+	const owned = readNativeSession(sessionId) ?? unmergedSlackSession(sessionId);
+	if (owned) return enrichSessionRuntime([owned])[0];
 	return (await getCachedSessionsAsync()).find(
 		(s) => s.id === sessionId || s.aliasIds?.includes(sessionId),
 	);

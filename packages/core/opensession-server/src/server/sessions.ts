@@ -79,7 +79,14 @@ export {
 // dev/demo instance listed the operator's real Slack/Linear history next to
 // its own — 159 live threads showed up in a demo instance meant to hold 9
 // synthetic sessions (2026-08-05).
-const SLACK_SESSIONS_DIR = statePath(".slack-sessions");
+// Resolved per call, not pinned at load: the Slack loop owns this store and
+// resolves the same path in ITS module (agents/slack/state.ts), so a root
+// repointed after either module loaded must not leave the two reading
+// different directories — the loop writing one file while the list index is
+// built from another. Costs one statePath per scan, not per row.
+function slackSessionsDir(): string {
+  return statePath(".slack-sessions");
+}
 const LINEAR_SESSIONS_DIR = statePath(".linear-sessions");
 const CLI_SESSIONS_DIR = statePath(".claude/sessions");
 const SESSIONS_DIR = OPENSESSION_SESSIONS_DIR;
@@ -729,57 +736,91 @@ function overlaySidecarExtras(session: UnifiedSession): UnifiedSession {
   return session;
 }
 
+/**
+ * The list projection for ONE file in the Slack loop's store.
+ *
+ * Split out of the scan below so a Slack write can index the row it just wrote
+ * in O(1), the way readNativeSessionListRow lets a native write index its own.
+ * The Slack store is the loop's, not ours: nothing here writes it.
+ */
+function slackSessionRow(dir: string, file: string): UnifiedSession | undefined {
+  const path = `${dir}/${file}`;
+  const data = readJsonSafe<SlackSessionFile>(path);
+  if (!data) return undefined;
+
+  const branch = data.branch || file.replace(".json", "");
+  const startedBy = data.userId
+    ? resolveSlackUser(data.userId)
+    : null;
+
+  // Use a stable ID based on filename
+  const id = `slack-${file.replace(".json", "")}`;
+  const archived = isArchivedId(id);
+
+  return overlaySidecarExtras({
+    id,
+    claudeSessionId: data.claudeSessionId || null,
+    source: "slack",
+    branch,
+    worktreeDir: data.worktreeDir || null,
+    createdBy: startedBy,
+    startedBy,
+    // The message that started the thread, when the loop recorded one.
+    // `branch` is the last resort: for a thread/DM session it is the raw
+    // `<channel>-<threadTs>` key, which is not a name anyone can read.
+    title: data.title?.trim() || branch,
+    lastActivity:
+      data.lastActivity || data.createdAt || getFileMtime(path),
+    createdAt: data.createdAt || getFileMtime(path),
+    isRunning: false,
+    transcriptPath: null,
+    slackThread: data.channel
+      ? { channel: data.channel, threadTs: data.threadTs || "" }
+      : undefined,
+    model: data.model,
+    codexThreadId: data.codexThreadId || undefined,
+    // Written by agent-session-sync when a web-UI run on a pi/* model minted
+    // an engine session; without it every pi read falls to the claude-slot
+    // ride and the run-start arm can't resume the pi session.
+    piSessionId: data.piSessionId || undefined,
+    archived: archived || undefined,
+    archivedReason: archived ? getArchiveReason(id) || "manual" : undefined,
+  });
+}
+
+/**
+ * Read one Slack session's list row by its unified id, without scanning the
+ * store. The file name is the id minus the `slack-` prefix; validated like
+ * readNativeSessionListRow's, because the key is built from Slack-supplied
+ * channel and thread ids and is about to become a path.
+ */
+export function readSlackSessionListRow(
+  sessionId: string,
+): UnifiedSession | undefined {
+  if (!sessionId.startsWith("slack-")) return undefined;
+  const key = sessionId.slice("slack-".length);
+  if (!/^[A-Za-z0-9_.-]{1,160}$/.test(key) || key.startsWith(".")) return undefined;
+  const file = `${key}.json`;
+  if (SKIP_FILES.has(file)) return undefined;
+  return slackSessionRow(slackSessionsDir(), file);
+}
+
+/** Read one Slack session directly, transcript included — the Slack-store
+ *  counterpart to readNativeSession, for the same reason: opening a known
+ *  session must not wait for a list scan to have observed it. */
+export function readSlackSession(sessionId: string): UnifiedSession | undefined {
+  const session = readSlackSessionListRow(sessionId);
+  return session ? withTranscriptPath(session) : undefined;
+}
+
 function* slackSessionRows(): Generator<UnifiedSession> {
-  if (!existsSync(SLACK_SESSIONS_DIR)) return [];
+  const dir = slackSessionsDir();
+  if (!existsSync(dir)) return;
 
-  for (const file of readdirSync(SLACK_SESSIONS_DIR)) {
+  for (const file of readdirSync(dir)) {
     if (!file.endsWith(".json") || SKIP_FILES.has(file)) continue;
-    const data = readJsonSafe<SlackSessionFile>(
-      `${SLACK_SESSIONS_DIR}/${file}`
-    );
-    if (!data) continue;
-
-    const branch = data.branch || file.replace(".json", "");
-    const startedBy = data.userId
-      ? resolveSlackUser(data.userId)
-      : null;
-
-    // Use a stable ID based on filename
-    const id = `slack-${file.replace(".json", "")}`;
-    const archived = isArchivedId(id);
-
-    yield overlaySidecarExtras({
-      id,
-      claudeSessionId: data.claudeSessionId || null,
-      source: "slack",
-      branch,
-      worktreeDir: data.worktreeDir || null,
-      createdBy: startedBy,
-      startedBy,
-      // The message that started the thread, when the loop recorded one.
-      // `branch` is the last resort: for a thread/DM session it is the raw
-      // `<channel>-<threadTs>` key, which is not a name anyone can read.
-      title: data.title?.trim() || branch,
-      lastActivity:
-        data.lastActivity ||
-        data.createdAt ||
-        getFileMtime(`${SLACK_SESSIONS_DIR}/${file}`),
-      createdAt:
-        data.createdAt || getFileMtime(`${SLACK_SESSIONS_DIR}/${file}`),
-      isRunning: false,
-      transcriptPath: null,
-      slackThread: data.channel
-        ? { channel: data.channel, threadTs: data.threadTs || "" }
-        : undefined,
-      model: data.model,
-      codexThreadId: data.codexThreadId || undefined,
-      // Written by agent-session-sync when a web-UI run on a pi/* model minted
-      // an engine session; without it every pi read falls to the claude-slot
-      // ride and the run-start arm can't resume the pi session.
-      piSessionId: data.piSessionId || undefined,
-      archived: archived || undefined,
-      archivedReason: archived ? getArchiveReason(id) || "manual" : undefined,
-    });
+    const row = slackSessionRow(dir, file);
+    if (row) yield row;
   }
 }
 
@@ -946,17 +987,23 @@ export function readNativeSessionListRow(
   return session;
 }
 
-/** Read one native session directly. Opening a known session must not wait for
- * the multi-thousand-file list scan that populates the sidebar. */
-export function readNativeSession(sessionId: string): UnifiedSession | undefined {
-  const session = readNativeSessionListRow(sessionId);
-  if (!session) return undefined;
+/** Attach the transcript a list row deliberately leaves off. Transcript
+ *  discovery traverses engine stores, so only a session someone is opening
+ *  pays for it. */
+function withTranscriptPath(session: UnifiedSession): UnifiedSession {
   session.transcriptPath = resolveTranscriptPath(
     findTranscriptPath(session.worktreeDir, session.claudeSessionId),
     session.codexThreadId,
     session.model,
   );
   return session;
+}
+
+/** Read one native session directly. Opening a known session must not wait for
+ * the multi-thousand-file list scan that populates the sidebar. */
+export function readNativeSession(sessionId: string): UnifiedSession | undefined {
+  const session = readNativeSessionListRow(sessionId);
+  return session ? withTranscriptPath(session) : undefined;
 }
 
 function* nativeSessionRows(): Generator<UnifiedSession> {
@@ -1378,7 +1425,7 @@ function removeSessionArtifacts(session: UnifiedSession): void {
     case "slack": {
       // ID format: slack-{filename}
       const filename = session.id.replace(/^slack-/, "") + ".json";
-      const path = `${SLACK_SESSIONS_DIR}/${filename}`;
+      const path = `${slackSessionsDir()}/${filename}`;
       if (existsSync(path)) unlinkSync(path);
       break;
     }

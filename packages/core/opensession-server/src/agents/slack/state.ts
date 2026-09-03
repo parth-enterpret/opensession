@@ -9,6 +9,9 @@ import { existsSync, readFileSync } from "fs";
 import { writeJsonAtomic } from "../../server/shared/atomic-write";
 import { configuredPaths, defaultRepo } from "../../server/config";
 import { statePath } from "../../server/paths";
+import { readSlackSessionListRow } from "../../server/sessions";
+import { upsertIndexedSession } from "../../server/session-list-store";
+import { invalidateSessionsCache } from "../../server/session-cache";
 import type { SlackSessionFile } from "../../server/types";
 
 // ---------------------------------------------------------------------------
@@ -147,7 +150,8 @@ export function getSessionKey(channel: string, threadTs?: string): string {
 export async function saveSession(session: SlackSession): Promise<void> {
   const key = getSessionKey(session.channel, session.threadTs);
   const sessionFile = `${SESSION_DIR}/${key}.json`;
-  const existing: SlackSessionFile = (await loadSession(key)) ?? {};
+  const previous = await loadSession(key);
+  const existing: SlackSessionFile = previous ?? {};
   const patch = Object.fromEntries(
     Object.entries(session).filter(([, v]) => v !== undefined)
   );
@@ -157,6 +161,36 @@ export async function saveSession(session: SlackSession): Promise<void> {
     codexThreadId: session.codexThreadId ?? existing.codexThreadId ?? null,
     lastActivity: new Date().toISOString(),
   });
+  indexSavedSession(`slack-${key}`, !previous);
+}
+
+/**
+ * Publish the write to the list index, the way updateSessionFile does for a
+ * native session.
+ *
+ * Once the materialized index has coverage it IS the session list — the whole-
+ * store scan that used to discover a Slack file never runs again — so a file
+ * nothing indexes is invisible to the UI for as long as it exists, not just
+ * until the next refresh. The GitHub agent hit the same wall and fixed it the
+ * same way (announceGithubRun).
+ *
+ * Only a session's FIRST write invalidates. saveSession runs several times per
+ * turn, and invalidateSessionsCache ends in a sessions_invalidated frame to
+ * every connected client plus a re-serialization of every list snapshot; the
+ * later writes only need the row itself current, which the upsert already
+ * makes it, and the read paths reconcile within their normal TTL.
+ *
+ * Best-effort and synchronous-safe: indexing must never fail a Slack turn.
+ */
+function indexSavedSession(sessionId: string, isNew: boolean): void {
+  try {
+    const row = readSlackSessionListRow(sessionId);
+    if (!row) return;
+    upsertIndexedSession(row);
+    if (isNew) invalidateSessionsCache();
+  } catch (e) {
+    console.error("[slack] Failed to index session:", e);
+  }
 }
 
 export async function loadSession(
