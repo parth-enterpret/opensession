@@ -449,6 +449,23 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   "find *": "allow", "head *": "allow", "tail *": "allow", "wc *": "allow",
   "tree*": "allow", "file *": "allow", "stat *": "allow", "du *": "allow",
   "df*": "allow", "which *": "allow", "pwd": "allow", "echo *": "allow",
+  // The same reads spelled with no argument. `"cat *"` needs a literal space
+  // AND an argument, so the pipeline tail every reviewer writes — `git log |
+  // cat`, `… | head`, `… | wc -l` on its own line — fell through to the "*"
+  // deny. That is what starved the command-center #75 review: the model spent
+  // its budget re-spelling reads the list meant to permit. Each of these is
+  // read-only with no argument at all (stdin passthrough, a usage banner, or
+  // a listing of the cwd).
+  "cat": "allow", "head": "allow", "tail": "allow", "wc": "allow",
+  "grep": "allow", "rg": "allow", "find": "allow", "file": "allow",
+  "stat": "allow", "du": "allow", "which": "allow", "echo": "allow",
+  "cut": "allow", "tr": "allow", "comm": "allow", "diff": "allow",
+  // find traverses (read) but can also execute and delete, and "find *" was
+  // already allowing both. Deny the action predicates on the spelling alone,
+  // fail-closed: a path that merely contains "-delete" is denied too, which
+  // costs a rare false refusal and closes an arbitrary-exec hole.
+  "find *-exec*": "deny", "find *-ok*": "deny", "find *-delete*": "deny",
+  "find *-fprint*": "deny", "find *-fls*": "deny",
   // `cd` is a shell builtin that only moves the shell's own working directory
   // and then exits. It cannot read, write, or spawn, and it grants no reach
   // this list did not already give (`cat *` accepts any absolute path), so
@@ -474,6 +491,17 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   // evaluates each sub-command, so an unlisted rev-parse denied the whole line.
   "git rev-parse*": "allow", "git cat-file*": "allow", "git describe*": "allow",
   "git merge-base*": "allow",
+  // `git remote` with no verb (or -v) prints the remotes from local config,
+  // and get-url reads that same file — the "which repo/fork is this" question
+  // a review asks before it reads a diff. NOT add/set-url/rename/remove
+  // (config writes), NOT update/prune (network + ref deletion), and NOT
+  // `show` (dials the remote — the network reach `git fetch` is denied for).
+  "git remote": "allow", "git remote -v": "allow",
+  "git remote --verbose": "allow", "git remote get-url*": "allow",
+  // `git diff --output=FILE` (and --output-indicator writes) put bytes on
+  // disk without ever passing through the redirection guard below, so the
+  // flag is denied on every git read. Fail-closed on the substring.
+  "git *--output*": "deny",
   // Read-only stdout filters — the usual tails on allowed git/gh reads
   // (`git show X:f | nl -ba`, `… | cut -d…`); an unlisted filter denies the
   // whole pipeline (each sub-command is evaluated, see rev-parse note).
@@ -501,6 +529,18 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   "gh pr list*": "allow", "gh pr view*": "allow",
   "gh pr checks*": "allow", "gh pr status*": "allow",
   "gh run view*": "allow", "gh run list*": "allow", "gh run watch*": "allow",
+  // `gh api` defaults to GET and is the only way to read what `gh pr view`
+  // omits: review threads, check annotations, a file at a ref. Mutating means
+  // passing an explicit flag, so allow the verb and deny those flags. -X
+  // covers `-X POST` and the concatenated `-XPOST`; -f/-F cover both `-f k=v`
+  // and pflag's `-fk=v`, which is what turns a GET into a POST (including
+  // `gh api graphql -f query=…`). Substring match, deliberately blunt: a URL
+  // containing "-f" (…/contents/some-file) is refused too. That costs a read
+  // the worktree already answers with `cat`, and it leaves no spelling of a
+  // write unguarded.
+  "gh api *": "allow",
+  "gh api*-X*": "deny", "gh api*--method*": "deny",
+  "gh api*-f*": "deny", "gh api*-F*": "deny", "gh api*--input*": "deny",
   // jq: a pure read-only JSON filter (no file writes, no shell-out, no code
   // exec — its language is sandboxed data transformation), so it's on par with
   // grep/wc for the allowlist. Lets ask-mode runs process `gh --json` / API
@@ -553,7 +593,11 @@ function askBashVerdict(segment: string): "allow" | "deny" {
 export function askBashDenyReason(command: string): string | null {
   const REFUSE =
     "Read-only ask mode: bash is limited to a read-only allowlist (file, git, gh and system reads). " +
-    "Propose the exact command in your reply for a human to run.";
+    "Writes, network fetches, installs and interpreters are refused, and no alternate spelling gets past " +
+    "this — do not retry the same command another way. Reads that work: cat/head/tail/ls/rg/grep/find/wc/jq, " +
+    "git status|log|show|diff|blame|ls-files|rev-parse|remote -v, gh pr view|list|checks, gh api (GET only). " +
+    "The code under review is already checked out here, so read it from the worktree. " +
+    "If the answer truly needs the denied command, finish without it and say so in your verdict.";
   const segments: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
@@ -606,9 +650,15 @@ export function askBashDenyReason(command: string): string | null {
       // Anything else writes a file, which read-only mode must refuse.
       let j = i + (ch === "&" ? 2 : 1);
       if (command[j] === ">") j++;
+      // A permitted redirect is not part of the command being matched. It used
+      // to be appended to the segment, so `whoami 2>&1` was matched as the
+      // literal string "whoami 2>&1" and missed the exact-spelling rules
+      // (whoami, pwd, cd, git hash-object --stdin). The fd number in front of
+      // the ">" was already consumed as part of the previous word, so drop it
+      // too — `echo 1>&2` is `echo`, exactly as bash reads it.
+      current = current.replace(/\d+$/, "");
       if (command[j] === "&" && /\d/.test(command[j + 1] || "")) {
         while (command[j] && !/\s/.test(command[j])) j++;
-        current += command.slice(i, j);
         i = j;
         continue;
       }
@@ -618,7 +668,6 @@ export function askBashDenyReason(command: string): string | null {
       if (command.slice(j, k) !== "/dev/null") {
         return `Output redirection writes a file. ${REFUSE}`;
       }
-      current += command.slice(i, k);
       i = k;
       continue;
     }

@@ -255,6 +255,86 @@ describe("askBashDenyReason", () => {
     expect(askBashDenyReason("cdrecord dev=/dev/sr0 x.iso")).not.toBeNull();
   });
 
+  test("allows the bare spelling of an allowlisted read", () => {
+    // The pipeline tail a reviewer writes to defeat the pager. `"cat *"` and
+    // friends require a literal space plus an argument, so these fell through
+    // to the "*" deny and starved a real review run.
+    expect(askBashDenyReason("git log --oneline | cat")).toBeNull();
+    expect(askBashDenyReason("git diff HEAD~1 | head")).toBeNull();
+    expect(askBashDenyReason("git show HEAD:f.ts | wc")).toBeNull();
+    expect(askBashDenyReason("cat")).toBeNull();
+    expect(askBashDenyReason("find")).toBeNull();
+    // Bare does not mean prefix: an unlisted binary that starts the same way
+    // is still denied.
+    expect(askBashDenyReason("catnip --pwn")).not.toBeNull();
+    expect(askBashDenyReason("findutils-install")).not.toBeNull();
+  });
+
+  test("a permitted redirect is not matched as part of the command", () => {
+    // "whoami 2>&1" used to be matched as that literal string and missed the
+    // exact-spelling rule for whoami.
+    expect(askBashDenyReason("whoami 2>&1")).toBeNull();
+    expect(askBashDenyReason("pwd 2>&1")).toBeNull();
+    expect(askBashDenyReason("cd /tmp/wt 2>&1")).toBeNull();
+    expect(askBashDenyReason("git remote -v 2>&1")).toBeNull();
+    expect(askBashDenyReason("git hash-object --stdin 2>&1")).toBeNull();
+    expect(askBashDenyReason("echo 1>&2")).toBeNull();
+    // Stripping the fd number must not swallow a real numeric argument.
+    expect(askBashDenyReason("head -n 20 f 2>/dev/null")).toBeNull();
+    // And it must not launder a denied command.
+    expect(askBashDenyReason("git fetch origin master 2>&1")).toContain("git fetch origin master");
+    expect(askBashDenyReason("npm i 2>&1")).not.toBeNull();
+  });
+
+  test("git remote reads local config; the mutating verbs stay denied", () => {
+    expect(askBashDenyReason("git remote")).toBeNull();
+    expect(askBashDenyReason("git remote -v")).toBeNull();
+    expect(askBashDenyReason("git remote --verbose")).toBeNull();
+    expect(askBashDenyReason("git remote get-url origin")).toBeNull();
+    expect(askBashDenyReason("git remote add fork git@github.com:o/r")).not.toBeNull();
+    expect(askBashDenyReason("git remote set-url origin x")).not.toBeNull();
+    expect(askBashDenyReason("git remote remove origin")).not.toBeNull();
+    expect(askBashDenyReason("git remote prune origin")).not.toBeNull();
+    expect(askBashDenyReason("git remote update")).not.toBeNull();
+    // `git remote show` dials the remote — the same network reach git fetch
+    // is denied for.
+    expect(askBashDenyReason("git remote show origin")).not.toBeNull();
+  });
+
+  test("gh api reads, but every flag that turns it into a write is denied", () => {
+    expect(askBashDenyReason("gh api repos/o/r/pulls/75/files --paginate")).toBeNull();
+    expect(askBashDenyReason("gh api repos/o/r/pulls/75/comments | jq '.[].body'")).toBeNull();
+    expect(askBashDenyReason("gh api repos/o/r -X POST")).not.toBeNull();
+    expect(askBashDenyReason("gh api repos/o/r -XPOST")).not.toBeNull();
+    expect(askBashDenyReason("gh api repos/o/r --method PATCH")).not.toBeNull();
+    expect(askBashDenyReason("gh api graphql -f query=mutation")).not.toBeNull();
+    expect(askBashDenyReason("gh api graphql -fquery=mutation")).not.toBeNull();
+    expect(askBashDenyReason("gh api repos/o/r -F body=@f")).not.toBeNull();
+    expect(askBashDenyReason("gh api repos/o/r --input body.json")).not.toBeNull();
+    // Still not bare `gh *`.
+    expect(askBashDenyReason("gh pr merge 75")).not.toBeNull();
+    expect(askBashDenyReason("gh pr comment 75 --body hi")).not.toBeNull();
+  });
+
+  test("widened reads do not open an exec or write path", () => {
+    expect(askBashDenyReason("find . -name '*.ts' -exec rm {} ;")).not.toBeNull();
+    expect(askBashDenyReason("find . -delete")).not.toBeNull();
+    expect(askBashDenyReason("find . -name x -fprintf out.txt %p")).not.toBeNull();
+    // git writes a file without ever touching the redirection guard.
+    expect(askBashDenyReason("git diff --output=/tmp/x HEAD")).not.toBeNull();
+    // Compound commands still deny on the dangerous segment, not the read.
+    expect(askBashDenyReason("cat README.md && git push")).toContain("git push");
+    expect(askBashDenyReason("git remote -v && rm -rf .")).toContain("rm -rf .");
+    expect(askBashDenyReason("gh api repos/o/r | tee out.json")).toContain("tee out.json");
+  });
+
+  test("the refusal tells the model what to do instead of retrying", () => {
+    const reason = askBashDenyReason("git fetch origin master") ?? "";
+    expect(reason).toContain("do not retry the same command another way");
+    expect(reason).toContain("gh pr view");
+    expect(reason).not.toContain("for a human to run");
+  });
+
   test("every pipeline segment must be allowed", () => {
     expect(askBashDenyReason("git log --oneline | head -5")).toBeNull();
     expect(askBashDenyReason("cat f.json | jq '.a' | wc -l")).toBeNull();
