@@ -499,6 +499,94 @@ export function piSteeringBoundaryTools(
   }));
 }
 
+/** Repeats before the guard stops serving content at all. 1 = the original
+ *  call; repeats 1 and 2 still get the bytes back (a re-check after new
+ *  information is legitimate and costs at most two extra reads); by the 3rd
+ *  repeat of a byte-identical call the model is not deciding, it is looping. */
+export const PI_REPEAT_STOP_AFTER = 3;
+
+/** Keyed on the EXACT call (tool name + arguments), not on the bytes it
+ *  returns. `bash git show HEAD:app.py` and `read app.py` return the same
+ *  content but are different calls, and they stay different keys here: the
+ *  model asked two different questions, content-keying would answer one of
+ *  them with a notice about a call it never made, and hashing every result to
+ *  find collisions buys nothing for the failure this fixes (54 byte-identical
+ *  bash calls in one review). Object keys are sorted so a re-emitted
+ *  `{path, offset}` still matches an earlier `{offset, path}`. */
+function repeatKey(name: string, params: unknown): string {
+  return `${name} ${JSON.stringify(params ?? null, (_k, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v as object).sort().map((k) => [k, (v as any)[k]]))
+      : v
+  )}`;
+}
+
+export const piRepeatNote = (n: number): string =>
+  n > PI_REPEAT_STOP_AFTER
+    ? `Repeat #${n} of this exact tool call. Output withheld: you already have this content verbatim earlier in this conversation. Stop re-reading and write your answer from what you have.`
+    : `Repeat #${n} of this exact tool call. The output below is the result of the first call, unchanged. You already have this content in this conversation.`;
+
+/**
+ * Pi drives a stateless model bridge whose visible turn is cut at the first
+ * tool-call batch, so the model's own conclusions never re-enter its context,
+ * only the forward-looking preamble does. It therefore re-derives the same
+ * next step every round and re-issues the same call, dozens of times, with
+ * nothing in context marking the repetition.
+ *
+ * Make the repetition visible. A byte-identical call gets its earlier result
+ * back behind a line saying so, and past PI_REPEAT_STOP_AFTER it gets only the
+ * instruction to answer with what it already has.
+ *
+ * Freshness beats de-duplication. Only the four tools that provably cannot
+ * mutate anything ever serve bytes from the cache; every other tool
+ * re-executes on a repeat and gets the note alone. `bash` and `mcp_call` can
+ * both write, and replaying a cached "comment posted" would swallow a second
+ * post the model meant to make. Anything outside PURE_READS also DROPS the
+ * cache, because it may have just changed a file a later `read` would
+ * otherwise answer from stale bytes. `edit`/`write` additionally reset the
+ * counters: a re-read after your own edit is not a repeat at all. The
+ * counters survive every other tool, which is what keeps a bash-only loop
+ * detectable, and that is the exact loop being fixed.
+ */
+const PI_PURE_READ_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+export function piRepeatCallGuardTools(
+  tools: readonly ToolDefinition<any, any, any>[]
+): ToolDefinition<any, any, any>[] {
+  // Per run: this factory runs once per run attempt, so the maps die with the
+  // run instead of leaking one session's answers into the next.
+  const seen = new Map<string, number>();
+  const cached = new Map<string, { content: unknown[] }>();
+  return tools.map((tool) => ({
+    ...tool,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const pureRead = PI_PURE_READ_TOOLS.has(tool.name);
+      if (!pureRead) cached.clear();
+      if (tool.name === "edit" || tool.name === "write") seen.clear();
+
+      const key = repeatKey(tool.name, params);
+      const n = (seen.get(key) ?? 0) + 1;
+      seen.set(key, n);
+      if (n > PI_REPEAT_STOP_AFTER) {
+        return { content: [{ type: "text", text: piRepeatNote(n) }], details: {} };
+      }
+      if (n === 1) {
+        const fresh = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
+        if (pureRead && Array.isArray((fresh as any)?.content)) cached.set(key, fresh as any);
+        return fresh;
+      }
+      const note = { type: "text" as const, text: piRepeatNote(n) };
+      try {
+        const result =
+          cached.get(key) ?? (await tool.execute(toolCallId, params, signal, onUpdate, ctx));
+        return { ...(result as any), content: [note, ...((result as any)?.content ?? [])] };
+      } catch (err) {
+        throw new Error(`${note.text}\n${err instanceof Error ? err.message : String(err)}`);
+      }
+    },
+  }));
+}
+
 export function cancelPiRun(id: string): boolean {
   const handle = activeRuns.get(id);
   if (!handle) return false;
@@ -1943,8 +2031,10 @@ async function* runPiAttempt(
           break;
       }
     }
+    // Repeat guard sits INSIDE the steering wrapper: a call skipped because a
+    // steer arrived never ran, so it must not count as a repeat.
     const customTools = piSteeringBoundaryTools(
-      baseCustomTools,
+      piRepeatCallGuardTools(baseCustomTools),
       () => steeringBoundaryPending,
     );
 

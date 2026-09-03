@@ -246,6 +246,15 @@ describe("askBashDenyReason", () => {
     expect(askBashDenyReason("realpath /home/ubuntu")).toBeNull();
   });
 
+  test("allows cd into the run's own worktree without widening the boundary", () => {
+    expect(askBashDenyReason("cd /home/ubuntu/.opensession/worktrees/os-review")).toBeNull();
+    expect(askBashDenyReason("cd /tmp/x && git diff HEAD")).toBeNull();
+    // The builtin must not become a prefix that smuggles a write past a segment.
+    expect(askBashDenyReason("cd /tmp && rm -rf .")).toContain("rm -rf .");
+    // No bare `cd*` glob: an unlisted binary that starts with "cd" stays denied.
+    expect(askBashDenyReason("cdrecord dev=/dev/sr0 x.iso")).not.toBeNull();
+  });
+
   test("every pipeline segment must be allowed", () => {
     expect(askBashDenyReason("git log --oneline | head -5")).toBeNull();
     expect(askBashDenyReason("cat f.json | jq '.a' | wc -l")).toBeNull();

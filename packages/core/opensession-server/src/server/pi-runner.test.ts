@@ -35,6 +35,9 @@ import {
   piDialOracleAgent,
   piGateReason,
   piStreamEventBlocksAccountRotation,
+  PI_REPEAT_STOP_AFTER,
+  piRepeatCallGuardTools,
+  piRepeatNote,
   piSteeringBoundaryTools,
   piToolNames,
   resolvePiPresetWiring,
@@ -112,6 +115,144 @@ describe("piSteeringBoundaryTools", () => {
     expect(skipped.content).toEqual([
       { type: "text", text: PI_STEER_TOOL_SKIP },
     ]);
+  });
+});
+
+describe("piRepeatCallGuardTools", () => {
+  const tool = (name: string, run: (params: any) => any) => ({
+    name,
+    label: name,
+    description: name,
+    parameters: {} as any,
+    async execute(_id: string, params: any) {
+      return run(params);
+    },
+  });
+  const text = (result: any) =>
+    result.content.map((block: any) => block.text).join("\n");
+
+  test("annotates a byte-identical repeat and serves the first result", async () => {
+    let runs = 0;
+    const [read] = piRepeatCallGuardTools([
+      tool("read", () => {
+        runs += 1;
+        return { content: [{ type: "text", text: `body ${runs}` }], details: {} };
+      }),
+    ]);
+
+    const first = await read.execute("a", { path: "app.py" }, undefined, undefined, {} as any);
+    expect(text(first)).toBe("body 1");
+
+    // Same call, keys re-emitted in a different order: still the same call.
+    const second = await read.execute("b", { path: "app.py" }, undefined, undefined, {} as any);
+    expect(runs).toBe(1);
+    expect(text(second)).toBe(`${piRepeatNote(2)}\nbody 1`);
+  });
+
+  test("keys on the exact call, so a different tool asking for the same bytes is untouched", async () => {
+    const calls: string[] = [];
+    const tools = piRepeatCallGuardTools([
+      tool("read", (p) => {
+        calls.push(`read:${p.path}`);
+        return { content: [{ type: "text", text: "same bytes" }], details: {} };
+      }),
+      tool("bash", (p) => {
+        calls.push(`bash:${p.command}`);
+        return { content: [{ type: "text", text: "same bytes" }], details: {} };
+      }),
+    ]);
+
+    const viaRead = await tools[0].execute("a", { path: "app.py" }, undefined, undefined, {} as any);
+    const viaBash = await tools[1].execute(
+      "b",
+      { command: "git show HEAD:app.py" },
+      undefined,
+      undefined,
+      {} as any,
+    );
+    const otherArgs = await tools[0].execute("c", { path: "tests.py" }, undefined, undefined, {} as any);
+
+    expect(text(viaRead)).toBe("same bytes");
+    expect(text(viaBash)).toBe("same bytes");
+    expect(text(otherArgs)).toBe("same bytes");
+    expect(calls).toEqual(["read:app.py", "bash:git show HEAD:app.py", "read:tests.py"]);
+  });
+
+  test("stops serving content once the repeats pass the threshold", async () => {
+    let runs = 0;
+    const [read] = piRepeatCallGuardTools([
+      tool("read", () => {
+        runs += 1;
+        return { content: [{ type: "text", text: "body" }], details: {} };
+      }),
+    ]);
+
+    const served: string[] = [];
+    for (let i = 0; i < PI_REPEAT_STOP_AFTER + 2; i++) {
+      served.push(
+        text(await read.execute(`c${i}`, { path: "app.py" }, undefined, undefined, {} as any)),
+      );
+    }
+
+    expect(runs).toBe(1);
+    expect(served[0]).toBe("body");
+    expect(served[PI_REPEAT_STOP_AFTER - 1]).toContain("The output below is the result of the first call");
+    expect(served[PI_REPEAT_STOP_AFTER]).toBe(piRepeatNote(PI_REPEAT_STOP_AFTER + 1));
+    expect(served[PI_REPEAT_STOP_AFTER]).not.toContain("body");
+    expect(served[PI_REPEAT_STOP_AFTER + 1]).toBe(piRepeatNote(PI_REPEAT_STOP_AFTER + 2));
+  });
+
+  test("an edit clears both the bytes and the repeat count, so a re-read is fresh", async () => {
+    let body = "before";
+    const tools = piRepeatCallGuardTools([
+      tool("read", () => ({ content: [{ type: "text", text: body }], details: {} })),
+      tool("edit", () => {
+        body = "after";
+        return { content: [{ type: "text", text: "edited" }], details: {} };
+      }),
+    ]);
+
+    for (let i = 0; i < PI_REPEAT_STOP_AFTER + 1; i++) {
+      await tools[0].execute(`c${i}`, { path: "app.py" }, undefined, undefined, {} as any);
+    }
+    await tools[1].execute("edit", { path: "app.py" }, undefined, undefined, {} as any);
+    const after = await tools[0].execute("fresh", { path: "app.py" }, undefined, undefined, {} as any);
+
+    expect(text(after)).toBe("after");
+  });
+
+  test("bash always re-executes, so a shell write cannot be served from cache", async () => {
+    let body = "before";
+    const tools = piRepeatCallGuardTools([
+      tool("read", () => ({ content: [{ type: "text", text: body }], details: {} })),
+      tool("bash", (p) => {
+        if (String(p.command).startsWith("write")) body = "after";
+        return { content: [{ type: "text", text: body }], details: {} };
+      }),
+    ]);
+
+    await tools[0].execute("a", { path: "app.py" }, undefined, undefined, {} as any);
+    await tools[1].execute("b", { command: "write" }, undefined, undefined, {} as any);
+    const reread = await tools[0].execute("c", { path: "app.py" }, undefined, undefined, {} as any);
+
+    // Still flagged as a repeat (the call IS a repeat), but the bytes are fresh.
+    expect(text(reread)).toBe(`${piRepeatNote(2)}\nafter`);
+  });
+
+  test("a repeated failing call carries the repeat note on the error", async () => {
+    const [bash] = piRepeatCallGuardTools([
+      tool("bash", () => {
+        throw new Error("not on the read-only allowlist");
+      }),
+    ]);
+    const args = { command: "sudo reboot" };
+
+    await expect(
+      bash.execute("a", args, undefined, undefined, {} as any),
+    ).rejects.toThrow("not on the read-only allowlist");
+    await expect(
+      bash.execute("b", args, undefined, undefined, {} as any),
+    ).rejects.toThrow(piRepeatNote(2));
   });
 });
 

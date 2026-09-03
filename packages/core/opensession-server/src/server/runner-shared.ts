@@ -449,6 +449,13 @@ export const ASK_BASH_PERMISSIONS: Record<string, "allow" | "deny"> = {
   "find *": "allow", "head *": "allow", "tail *": "allow", "wc *": "allow",
   "tree*": "allow", "file *": "allow", "stat *": "allow", "du *": "allow",
   "df*": "allow", "which *": "allow", "pwd": "allow", "echo *": "allow",
+  // `cd` is a shell builtin that only moves the shell's own working directory
+  // and then exits. It cannot read, write, or spawn, and it grants no reach
+  // this list did not already give (`cat *` accepts any absolute path), so
+  // path containment was never this allowlist's job. Segments are evaluated
+  // one by one, so `cd X && rm -rf .` is still denied on the `rm`. Exact
+  // spellings, no bare `cd*` glob: that would also match `cdrecord`.
+  "cd": "allow", "cd *": "allow",
   // Identity, kernel, environment, and path inspection. These commands only
   // print process or filesystem metadata and cannot mutate the host.
   "whoami": "allow", "id": "allow", "id *": "allow", "uname": "allow",
