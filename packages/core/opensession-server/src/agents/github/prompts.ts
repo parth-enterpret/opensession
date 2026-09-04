@@ -639,7 +639,9 @@ PR: ${pr.url}  ·  base: ${pr.baseRefName} <- head: ${pr.headRefName}  ·  +${pr
   } across ${pr.changedFiles} files.
 
 Your checkout is pinned to the PR's HEAD and both refs are fetched. Run
-\`git diff --find-renames origin/${pr.baseRefName}...HEAD\` to read the complete diff. Read and Grep the checkout freely for orientation.
+\`git diff --find-renames origin/${pr.baseRefName}...HEAD\` ONCE to read the complete diff, and work from that.
+
+**Do not investigate.** Do not open files to check whether a suspicion holds, do not grep for callers, do not read tests to see if a case is covered. Every question you emit gets a whole agent of its own, with the checkout and as long as it needs — that agent does the investigating. If you do it here you do it once, serially, in the one place that blocks all of them from starting. Naming a question you turn out to be wrong about costs one agent turn; spending this turn proving it costs the entire review's latency.
 
 Changed files:
 ${files.map((f) => `- \`${f}\``).join("\n")}

@@ -384,6 +384,23 @@ export const HYPOTHESIS = {
   /** Hard ceiling on questions, i.e. on extra agent runs per review. */
   max: 6,
   /**
+   * Wall clock for the planning turn, absolute.
+   *
+   * NOT a fraction of the review budget. The fraction (0.12) was killed because
+   * it cut the planner off mid-turn and it contributed nothing; removing it
+   * entirely was the opposite mistake. With 45 minutes and no pressure the
+   * planner stopped planning and started reviewing -- 41 calls and $1.86 in ten
+   * minutes, reading files and checking whether a permission gap was covered,
+   * while every sweep waited on it. That work belongs in the sweeps, which run
+   * in parallel; done here it is serial and it blocks.
+   *
+   * Ten minutes is generous for naming questions from a diff already read once,
+   * and short enough that sprawl cannot get expensive. A planner that overruns
+   * still contributes nothing, but it now costs ten minutes instead of an hour,
+   * and the prompt tells it not to investigate in the first place.
+   */
+  timeoutMs: 10 * 60 * 1000,
+  /**
    * Files a single question may claim. A question that implicates half the PR
    * is not a hypothesis, it is a restatement of the diff, and it would inherit
    * exactly the shallow-sweep failure stage 0 exists to escape.

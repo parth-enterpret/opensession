@@ -257,8 +257,9 @@ async function planHypotheses(opts: {
     title: `${opts.title} · plan`.slice(0, 100),
     resume: false,
     detached: false,
-    // No stage budget. Stage 0 gets the whole run allowance; see review-fanout.ts.
-    timeoutMs: githubRunTimeoutMs(totalLines),
+    // Stage 0 is capped absolutely, not as a share of the run: it plans, it does
+    // not investigate, and it blocks every sweep while it runs. See HYPOTHESIS.
+    timeoutMs: Math.min(HYPOTHESIS.timeoutMs, githubRunTimeoutMs(totalLines)),
   }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
   if (result.error) {
     console.warn(`[github] review plan on PR #${pr.number} failed: ${result.error}`);
