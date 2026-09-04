@@ -186,7 +186,7 @@ export function buildReviewPrompt(
     lastReviewedSha?: string;
     /** Stage 1 of the fanned-out review: this run sees only these files and is
      *  biased toward recall (review-fanout.ts). */
-    batch?: { files: string[]; index: number; total: number };
+    batch?: { files: string[]; index: number; total: number; question?: string };
   },
 ): string {
   const header = isUpdate
@@ -207,17 +207,47 @@ Your checkout is pinned to the PR's HEAD and both refs are fetched. Run
   // deliberately overrides it. The bar decides what gets POSTED; stage 1 is not
   // where it is applied. A single prompt asked to be both thorough and quiet
   // resolves the tension by being quiet about hard things.
-  const batchSection = extras?.batch
-    ? `## This run is stage 1 of 3 — recall sweep (batch ${extras.batch.index} of ${extras.batch.total})
+  const q = extras?.batch?.question;
+  const batchScope = q
+    ? `## This run is stage 1 of 3 — one behaviour (pass ${extras!.batch!.index} of ${extras!.batch!.total})
+
+Your job is ONE question about how this PR behaves end to end:
+
+> ${q}
+
+Answer it by tracing the behaviour through the files below, in whatever order the
+code leads you. The files are where the behaviour was changed, not a checklist —
+read past them freely, and follow the flow into unchanged code when that is where
+it breaks. Sibling runs read each of these files on its own; you are here for what
+none of them can see, which is the sequence.
+
+The defect you are looking for is usually one where every individual step is
+correct and the composition is not: a value that survives four hops and is wrong
+after the fifth, a caller left on an old contract, a state the new edge cannot
+reach, an invariant one side stopped honouring. If you trace the behaviour and it
+holds, say so in one sentence and emit no findings — that is a complete answer.
+
+Findings you notice along the way that are NOT about this behaviour are still
+worth writing down. Nothing is lost by reporting them here.
+
+Files this behaviour passes through:`
+    : `## This run is stage 1 of 3 — recall sweep (batch ${extras?.batch?.index} of ${extras?.batch?.total})
 
 You are reviewing ONLY the files listed below. Sibling runs cover the rest of the PR, and every candidate you raise then goes to its OWN later run — a different conversation, one per candidate, which cannot see yours — whose only job is to try to refute it against the code. What it cannot refute reaches the PR. Nothing you write here is posted unfiltered.
 
-Your files:
+Your files:`;
+
+  const batchSection = extras?.batch
+    ? `${batchScope}
 ${extras.batch.files.map((f) => `- \`${f}\``).join("\n")}
 
 Start with \`git diff --find-renames origin/${pr.baseRefName}...HEAD -- ${extras.batch.files
         .map((f) => `'${f}'`)
-        .join(" ")}\`, then read each of those files whole. Take them one at a time and finish one before starting the next. You have the entire checkout read-only, so Grep and Read anything else you need.
+        .join(" ")}\`, then ${
+        q
+          ? "follow the behaviour: read whichever of those files the flow starts in, then Grep and Read your way along it. Do not stop at the diff — the break is often in unchanged code that the change now reaches differently"
+          : "read each of those files whole. Take them one at a time and finish one before starting the next"
+      }. You have the entire checkout read-only, so Grep and Read anything else you need.
 
 In THIS pass the bias is recall, not restraint:
 - Write down every candidate you notice, including ones you are not certain about. A candidate you never wrote down is one the filter never gets to consider.
@@ -573,4 +603,77 @@ ${steerBlock(steer)}
 Then commit the cleanups with a clear message and push to the PR branch: \`git push origin HEAD:${pr.headRefName}\`. If there was nothing worth simplifying, make no commits and say so. NEVER merge the PR (\`gh pr merge\` is forbidden).
 
 When finished, output the marker \`===OPENSESSION-SUMMARY===\` on its own line, then a one-line summary of what you simplified (or "Nothing to simplify"). ONLY the text after that marker is posted to the PR — everything before it is working notes that stay private.`;
+}
+
+/**
+ * Stage 0 of the fanned-out review: decide what to investigate, before anyone
+ * investigates anything.
+ *
+ * This is a planning turn, not a review turn. It emits no findings and its
+ * output is never posted. It exists because per-file batches can only find
+ * per-file defects, and the defects we were missing are behaviours that span
+ * several files which are each locally correct.
+ *
+ * Deliberately cheap and deliberately shallow: it reads the diff and names the
+ * flows, it does not chase them. Chasing is stage 1's job, with a whole agent
+ * turn per flow.
+ */
+export function buildHypothesisPrompt(opts: {
+  pr: PrDetails;
+  files: string[];
+  max: number;
+  maxFilesPerQuestion: number;
+  ghRepo?: string;
+}): string {
+  const { pr, files } = opts;
+  return `You are planning a code review of PR #${pr.number} ("${pr.title}") on ${
+    opts.ghRepo || defaultRepo().ghRepo
+  }. You are NOT reviewing it. Emit no findings.
+
+PR: ${pr.url}  ·  base: ${pr.baseRefName} <- head: ${pr.headRefName}  ·  +${pr.additions}/-${
+    pr.deletions
+  } across ${pr.changedFiles} files.
+
+Your checkout is pinned to the PR's HEAD and both refs are fetched. Run
+\`git diff --find-renames origin/${pr.baseRefName}...HEAD\` to read the complete diff. Read and Grep the checkout freely for orientation.
+
+Changed files:
+${files.map((f) => `- \`${f}\``).join("\n")}
+
+## What to produce
+
+A list of at most ${opts.max} INVESTIGATION QUESTIONS. Each question names one concrete end-to-end behaviour this PR changes, and lists the changed files that behaviour passes through.
+
+Reviewers scoped to a single file are already covering every file in this PR one at a time. They will find anything wrong *within* a file. Your questions exist to catch what none of them can see: a behaviour that is correct at every individual step and wrong as a sequence.
+
+So bias hard toward flows that CROSS files:
+- A value's round trip. Where does it get created, stored, serialized, rendered, read back, and edited? Does it survive every hop unchanged?
+- A contract change and its callers. If a signature, a type, an event name, a key, or a return shape changed, which call sites still assume the old one?
+- A state machine's edges. Which transitions did this PR add, and which existing transition now has an unhandled case?
+- An invariant two files must agree on. What does one side assume that the other now violates?
+- A new failure mode. What happens on the empty, duplicate, concurrent, cancelled, or out-of-order case along this path?
+
+Rules:
+- Each question must be answerable by reading code. "Is the paste handler correct?" is not a question; "When a user pastes a link adjacent to a smart quote, does the token boundary survive serialize and round-trip back through copy?" is.
+- Every path in \`files\` must be copied EXACTLY from the changed-files list above. A path not in that list makes the question unusable and it is dropped.
+- At most ${opts.maxFilesPerQuestion} files per question. A question spanning more than that is a restatement of the diff, not a hypothesis. Split it.
+- Prefer ${opts.max} sharp questions over ${opts.max} vague ones, but emit fewer if the PR genuinely has fewer distinct behaviours. A PR of ${pr.changedFiles} independent one-line fixes may warrant very few.
+- Do not ask about things a single-file reviewer already handles well: style, naming, local null checks, a typo in one function.
+
+## Output format (required)
+
+End your turn with EXACTLY ONE fenced \`json\` code block, and nothing after it:
+
+\`\`\`json
+{
+  "hypotheses": [
+    {
+      "question": "One sentence naming the behaviour and the specific way it could be wrong.",
+      "files": ["exact/path/from/the/list.ts", "another/exact/path.ts"]
+    }
+  ]
+}
+\`\`\`
+
+Do not wrap the JSON in prose. Emit \`{"hypotheses": []}\` if this PR has no cross-file behaviour worth a dedicated pass.`;
 }

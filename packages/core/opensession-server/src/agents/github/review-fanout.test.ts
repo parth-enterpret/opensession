@@ -4,12 +4,19 @@ import {
   changedFilesFromPatch,
   dedupeFindings,
   FANOUT,
+  HYPOTHESIS,
+  planHypothesisBatches,
   planReviewBatches,
   planVerifications,
   VERIFY,
 } from "./review-fanout";
 import { buildReviewPrompt, buildVerifyPrompt } from "./prompts";
-import { isCompleteReviewOutput, parseReviewOutput, parseVerifyOutput } from "./review";
+import {
+  isCompleteReviewOutput,
+  parseHypotheses,
+  parseReviewOutput,
+  parseVerifyOutput,
+} from "./review";
 import type { Finding } from "./review";
 import type { PrDetails } from "../../server/pr-info";
 
@@ -392,5 +399,144 @@ describe("stage 3 — deterministic assembly", () => {
     // Two verifiers can re-anchor two copies of one defect onto the same line.
     const r = assembleReview([f({ line: 7, title: "Null deref" }), f({ line: 7, title: "Null deref" })], ctx);
     expect(r.findings).toHaveLength(1);
+  });
+});
+
+describe("stage 0: hypothesis batches", () => {
+  const changed = [
+    { path: "src/a.ts", lines: 10 },
+    { path: "src/b.ts", lines: 5 },
+    { path: "src/c.ts", lines: 2 },
+  ];
+
+  test("numbers from startIndex and sums the churn it claims", () => {
+    const out = planHypothesisBatches(
+      [{ question: "Does a value survive a to b?", files: ["src/a.ts", "src/b.ts"] }],
+      changed,
+      13,
+    );
+    expect(out).toEqual([
+      {
+        index: 13,
+        files: ["src/a.ts", "src/b.ts"],
+        lines: 15,
+        question: "Does a value survive a to b?",
+      },
+    ]);
+  });
+
+  test("drops paths the diff does not contain, keeping the rest of the question", () => {
+    const out = planHypothesisBatches(
+      [{ question: "q", files: ["src/a.ts", "src/invented.ts"] }],
+      changed,
+      1,
+    );
+    expect(out[0]?.files).toEqual(["src/a.ts"]);
+  });
+
+  test("drops a question left with no real files at all", () => {
+    expect(planHypothesisBatches([{ question: "q", files: ["nope.ts"] }], changed, 1)).toEqual([]);
+  });
+
+  test("drops a question that restates the whole diff", () => {
+    const wide = Array.from({ length: 9 }, (_, i) => ({ path: `src/f${i}.ts`, lines: 1 }));
+    const out = planHypothesisBatches(
+      [{ question: "q", files: wide.map((f) => f.path) }],
+      wide,
+      1,
+      { ...HYPOTHESIS, maxFilesPerQuestion: 6 },
+    );
+    expect(out).toEqual([]);
+  });
+
+  test("collapses two questions over the same files into one batch", () => {
+    const out = planHypothesisBatches(
+      [
+        { question: "first", files: ["src/a.ts", "src/b.ts"] },
+        { question: "second", files: ["src/b.ts", "src/a.ts"] },
+      ],
+      changed,
+      1,
+    );
+    expect(out.map((b) => b.question)).toEqual(["first"]);
+  });
+
+  test("honours the ceiling on extra agent runs", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      question: `q${i}`,
+      files: [changed[i % changed.length]!.path],
+    }));
+    expect(planHypothesisBatches(many, changed, 1).length).toBeLessThanOrEqual(HYPOTHESIS.max);
+  });
+
+  test("skips a question with no text", () => {
+    expect(planHypothesisBatches([{ question: "  ", files: ["src/a.ts"] }], changed, 1)).toEqual([]);
+  });
+});
+
+describe("stage 0: reading the planner's output", () => {
+  const block = (body: string): string => `narration\n\`\`\`json\n${body}\n\`\`\``;
+
+  test("reads questions and files", () => {
+    expect(
+      parseHypotheses(block('{"hypotheses":[{"question":"q","files":["a.ts"]}]}')),
+    ).toEqual([{ question: "q", files: ["a.ts"] }]);
+  });
+
+  test("takes the last block when the agent narrated with earlier ones", () => {
+    const text = `${block('{"hypotheses":[{"question":"draft","files":["a.ts"]}]}')}\n${block(
+      '{"hypotheses":[{"question":"final","files":["b.ts"]}]}',
+    )}`;
+    expect(parseHypotheses(text).map((h) => h.question)).toEqual(["final"]);
+  });
+
+  test("returns nothing for malformed json rather than throwing", () => {
+    expect(parseHypotheses(block("{not json"))).toEqual([]);
+  });
+
+  test("returns nothing when the agent emitted no block at all", () => {
+    expect(parseHypotheses("I could not plan this PR.")).toEqual([]);
+  });
+
+  test("drops entries missing a question or files", () => {
+    expect(
+      parseHypotheses(
+        block('{"hypotheses":[{"question":"q"},{"files":["a.ts"]},{"question":"ok","files":["a.ts"]}]}'),
+      ),
+    ).toEqual([{ question: "ok", files: ["a.ts"] }]);
+  });
+
+  test("empty plan is a valid plan", () => {
+    expect(parseHypotheses(block('{"hypotheses":[]}'))).toEqual([]);
+  });
+});
+
+describe("the batch prompt adapts to what the batch is for", () => {
+  const pr = {
+    number: 7,
+    title: "t",
+    url: "https://example.test/pr/7",
+    baseRefName: "master",
+    headRefName: "feat",
+    additions: 10,
+    deletions: 1,
+    changedFiles: 6,
+  } as PrDetails;
+
+  test("a question batch is told to trace the flow, not to read files one at a time", () => {
+    const p = buildReviewPrompt("base", pr, false, undefined, "o/r", {
+      batch: { files: ["a.ts", "b.ts"], index: 1, total: 3, question: "Does X survive Y?" },
+    });
+    expect(p).toContain("Does X survive Y?");
+    expect(p).toContain("follow the behaviour");
+    expect(p).not.toContain("Take them one at a time");
+  });
+
+  test("a coverage batch keeps the per-file instruction", () => {
+    const p = buildReviewPrompt("base", pr, false, undefined, "o/r", {
+      batch: { files: ["a.ts"], index: 1, total: 3 },
+    });
+    expect(p).toContain("Take them one at a time");
+    expect(p).toContain("recall sweep");
   });
 });

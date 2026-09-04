@@ -34,6 +34,15 @@ export interface ReviewBatch {
   files: string[];
   /** Added + removed lines across the batch's files, for its wall-clock share. */
   lines: number;
+  /**
+   * The one behaviour this batch investigates, when it came from stage 0.
+   * Absent on coverage batches, which are scoped by file and nothing else.
+   *
+   * A batch with a question reviews a FLOW across its files; a batch without one
+   * reviews the files. Both exist because they miss different things — see
+   * `planHypothesisBatches`.
+   */
+  question?: string;
 }
 
 export const FANOUT = {
@@ -317,4 +326,95 @@ export function assembleReview(
     summary_markdown: `${lead} ${how}`,
     findings,
   };
+}
+
+// -- Stage 0: hypothesis planning ----------------------------
+/**
+ * Stage 0's knobs, and the reason this stage exists at all.
+ *
+ * Per-file batching was measured and found insufficient in a specific way.
+ * Giving `PromptEditorRoot.tsx` an entire batch to itself produced 0 findings
+ * where the incumbent reviewers found 4 in that same file. More attention on
+ * one file did not surface them, so attention density was never the binding
+ * constraint. Their 31 findings are feature-semantic: a defect in how a pasted
+ * link survives serialize / render / copy / edit, spread across five files that
+ * each look locally correct. A reviewer scoped to one file cannot see a
+ * five-file behaviour, however long it stares.
+ *
+ * Every incumbent that beats us made the same move away from file scope.
+ * Greptile's v2 flowchart looped `for each changed file`, and their v5 replaced
+ * it with "a swarm of agents that each explore one hypothesis for a potential
+ * bug". Wealthfront spawns sub-agents per proposed problem. pr-af partitions by
+ * LLM-chosen "dimensions". So stage 0 asks one cheap pass over the whole diff
+ * which behaviours this PR changes, and stage 1 runs one agent per behaviour.
+ *
+ * Hypothesis batches are ADDED TO file coverage, never substituted for it. A
+ * question the planner failed to ask would otherwise silently un-review a file,
+ * and coverage is still necessary even though it has been shown insufficient.
+ * The cost of running both is real and affordable: published per-PR cost for
+ * comparable agentic pipelines sits at $1-5, and Cloudflare runs a seven-agent
+ * fleet at $1.19 average.
+ */
+export const HYPOTHESIS = {
+  /**
+   * Below this many changed files there is no cross-file flow to miss, and the
+   * coverage batches already read every line. Matches FANOUT.minFiles so the
+   * two stages switch on together.
+   */
+  minFiles: 5,
+  /** Hard ceiling on questions, i.e. on extra agent runs per review. */
+  max: 12,
+  /**
+   * Files a single question may claim. A question that implicates half the PR
+   * is not a hypothesis, it is a restatement of the diff, and it would inherit
+   * exactly the shallow-sweep failure stage 0 exists to escape.
+   */
+  maxFilesPerQuestion: 6,
+  /** Stage 0's share of the review's wall clock. One cheap planning turn. */
+  budgetFraction: 0.12,
+};
+
+/** One investigation question, as stage 0's agent emits it. */
+export interface Hypothesis {
+  question: string;
+  files: string[];
+}
+
+/**
+ * Turn stage 0's raw output into batches, dropping what cannot be acted on.
+ *
+ * Rejects a question whose files are not in the diff (the planner invented a
+ * path), whose file set is empty after that filter, or which claims more than
+ * `maxFilesPerQuestion`. Deduplicates by file set, because two questions over
+ * the same files are one batch's worth of attention split in half.
+ *
+ * `startIndex` continues the numbering of the coverage batches these run
+ * alongside, so `sweep-<index>` stays unique across the whole stage.
+ */
+export function planHypothesisBatches(
+  hypotheses: Hypothesis[],
+  changed: Array<{ path: string; lines: number }>,
+  startIndex: number,
+  cfg = HYPOTHESIS,
+): ReviewBatch[] {
+  const linesOf = new Map(changed.map((f) => [f.path, f.lines]));
+  const seen = new Set<string>();
+  const out: ReviewBatch[] = [];
+  for (const h of hypotheses) {
+    const question = (h?.question || "").trim();
+    if (!question) continue;
+    const files = [...new Set(h?.files || [])].filter((f) => linesOf.has(f));
+    if (!files.length || files.length > cfg.maxFilesPerQuestion) continue;
+    const key = [...files].sort().join(" ");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      index: startIndex + out.length,
+      files,
+      lines: files.reduce((n, f) => n + (linesOf.get(f) || 0), 0),
+      question,
+    });
+    if (out.length >= cfg.max) break;
+  }
+  return out;
 }

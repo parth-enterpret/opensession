@@ -32,14 +32,23 @@ import {
 } from "./run";
 import {
   assembleReview,
+  changedFilesFromPatch,
   dedupeFindings,
   FANOUT,
+  HYPOTHESIS,
+  planHypothesisBatches,
   planReviewBatches,
   planVerifications,
   VERIFY,
+  type Hypothesis,
   type ReviewBatch,
 } from "./review-fanout";
-import { buildReviewPrompt, buildVerifyPrompt, DEFAULT_REVIEW_PROMPT } from "./prompts";
+import {
+  buildHypothesisPrompt,
+  buildReviewPrompt,
+  buildVerifyPrompt,
+  DEFAULT_REVIEW_PROMPT,
+} from "./prompts";
 import {
   getComment,
   postIssueComment,
@@ -185,6 +194,90 @@ const SEV_EMOJI: Record<string, string> = {
 };
 
 /**
+ * Stage 0 of the fanned-out review: ask what to investigate.
+ *
+ * One planning turn over the whole diff that emits investigation questions,
+ * each naming a behaviour the PR changes and the changed files it passes
+ * through. Stage 1 then runs one agent per question, alongside (never instead
+ * of) the per-file coverage batches.
+ *
+ * Best-effort, like every other stage: a planner that errors, times out, or
+ * emits nothing leaves the review exactly as it was before this stage existed.
+ * That is why it returns batches to append rather than batches to substitute.
+ */
+async function planHypotheses(opts: {
+  pr: PrRef;
+  details: PrAutomationDetails;
+  changed: Array<{ path: string; lines: number }>;
+  startIndex: number;
+  cwd: string;
+  model?: string;
+  title: string;
+  cancelled: () => boolean;
+}): Promise<ReviewBatch[]> {
+  const { pr, changed } = opts;
+  if (changed.length < HYPOTHESIS.minFiles) return [];
+  if (opts.cancelled() || isShuttingDown()) return [];
+  const totalLines = opts.details.additions + opts.details.deletions;
+  const result = await runGithubAgent({
+    prNumber: pr.number,
+    ghRepo: pr.ghRepo,
+    kind: "review",
+    sessionSuffix: "plan",
+    prompt: buildHypothesisPrompt({
+      pr: opts.details,
+      files: changed.map((f) => f.path),
+      max: HYPOTHESIS.max,
+      maxFilesPerQuestion: HYPOTHESIS.maxFilesPerQuestion,
+      ghRepo: pr.ghRepo,
+    }),
+    cwd: opts.cwd,
+    mode: "ask",
+    model: opts.model,
+    branch: pr.headRef,
+    title: `${opts.title} · plan`.slice(0, 100),
+    resume: false,
+    detached: false,
+    timeoutMs: Math.round(githubRunTimeoutMs(totalLines) * HYPOTHESIS.budgetFraction),
+  }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
+  if (result.error) {
+    console.warn(`[github] review plan on PR #${pr.number} failed: ${result.error}`);
+  }
+  const raw = parseHypotheses(result.text);
+  const batches = planHypothesisBatches(raw, changed, opts.startIndex);
+  console.log(
+    `[github] review plan on PR #${pr.number}: ${raw.length} question(s) proposed, ${batches.length} usable`,
+  );
+  return batches;
+}
+
+/**
+ * Read stage 0's JSON block. Returns `[]` for anything unparseable — the
+ * planner is an optimisation, and a malformed plan must cost the review
+ * nothing beyond the turn already spent.
+ */
+export function parseHypotheses(text: string): Hypothesis[] {
+  const blocks = [...(text || "").matchAll(/```json\s*([\s\S]*?)```/g)];
+  const last = blocks[blocks.length - 1]?.[1];
+  if (!last) return [];
+  let data: unknown;
+  try {
+    data = JSON.parse(last);
+  } catch {
+    return [];
+  }
+  const list = (data as { hypotheses?: unknown })?.hypotheses;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((h): Hypothesis[] => {
+    const question = typeof (h as Hypothesis)?.question === "string" ? (h as Hypothesis).question : "";
+    const files = Array.isArray((h as Hypothesis)?.files)
+      ? (h as Hypothesis).files.filter((f): f is string => typeof f === "string")
+      : [];
+    return question && files.length ? [{ question, files }] : [];
+  });
+}
+
+/**
  * Stage 1 of the fanned-out review: run the review agent once per batch and
  * return the merged, deduplicated candidate list.
  *
@@ -248,7 +341,12 @@ async function runRecallSweep(opts: {
           ignoreGlobs: opts.ignoreGlobs,
           intent: prIntentSection(opts.details),
           learnedRules: opts.learnedRules,
-          batch: { files: batch.files, index: batch.index, total: batches.length },
+          batch: {
+            files: batch.files,
+            index: batch.index,
+            total: batches.length,
+            question: batch.question,
+          },
         }),
         cwd: opts.cwd,
         mode: "ask",
@@ -717,6 +815,25 @@ export async function runReview(
       batches = diff?.patch
         ? planReviewBatches(diff.patch, (path) => pathIgnored(path, reviewOpts))
         : [];
+      // Stage 0 runs only once coverage batching has already decided this PR is
+      // big enough to fan out at all, and its output is APPENDED: the file
+      // batches still read every file. See HYPOTHESIS in review-fanout.ts.
+      if (batches.length && diff?.patch) {
+        const changed = changedFilesFromPatch(diff.patch).filter(
+          (f) => !pathIgnored(f.path, reviewOpts),
+        );
+        const hypothesisBatches = await planHypotheses({
+          pr,
+          details,
+          changed,
+          startIndex: batches.length + 1,
+          cwd,
+          model: reviewModel,
+          title,
+          cancelled: cancellationRequested,
+        });
+        batches = [...batches, ...hypothesisBatches];
+      }
     }
     if (batches.length) {
       if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
@@ -739,6 +856,7 @@ export async function runReview(
         pr_number: pr.number,
         repo: pr.ghRepo || defaultRepo().ghRepo,
         batches: batches.length,
+        hypothesis_batches: batches.filter((b) => b.question).length,
         candidates: candidates.length,
       });
       // A fanned-out review runs for minutes. Keep the placeholder honest about
