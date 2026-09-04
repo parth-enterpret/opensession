@@ -257,7 +257,8 @@ async function planHypotheses(opts: {
     title: `${opts.title} · plan`.slice(0, 100),
     resume: false,
     detached: false,
-    timeoutMs: Math.round(githubRunTimeoutMs(totalLines) * HYPOTHESIS.budgetFraction),
+    // No stage budget. Stage 0 gets the whole run allowance; see review-fanout.ts.
+    timeoutMs: githubRunTimeoutMs(totalLines),
   }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
   if (result.error) {
     console.warn(`[github] review plan on PR #${pr.number} failed: ${result.error}`);
@@ -334,7 +335,7 @@ async function runRecallSweep(opts: {
   // of multiplying by the batch count.
   const totalLines = opts.details.additions + opts.details.deletions;
   const deadline =
-    Date.now() + Math.round(githubRunTimeoutMs(totalLines) * FANOUT.stageOneBudgetFraction);
+    Date.now() + githubRunTimeoutMs(totalLines);
   const queue = [...batches];
   const found: Finding[] = [];
   let ran = 0;
@@ -498,8 +499,8 @@ async function runVerifySweep(opts: {
   const { verify, unverified } = planVerifications(opts.candidates);
   const totalLines = opts.details.additions + opts.details.deletions;
   const deadline =
-    Date.now() + Math.round(githubRunTimeoutMs(totalLines) * VERIFY.budgetFraction);
-  const turnMs = Math.round(githubRunTimeoutMs(0) * VERIFY.turnFraction);
+    Date.now() + githubRunTimeoutMs(totalLines);
+  const turnMs = githubRunTimeoutMs(0);
   const queue = verify.map((finding, i) => ({ finding, index: i + 1 }));
   const out: VerifySweepResult = {
     survivors: [],

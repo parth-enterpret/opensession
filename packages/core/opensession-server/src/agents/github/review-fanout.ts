@@ -45,6 +45,26 @@ export interface ReviewBatch {
   question?: string;
 }
 
+/**
+ * NO STAGE BUDGETS.
+ *
+ * Every stage used to get a fraction of what a single-pass review of the same
+ * diff would be allowed: stage 0 took 0.12, stage 1 took 0.6, stage 2 took 0.4,
+ * and each verifier took 0.25 of the floor. The intent was to keep a fanned-out
+ * review near 1x the single-pass wall clock.
+ *
+ * It starved the pipeline instead. Measured on the first production run against
+ * PR #12272: stage 0's planner ran for 5m24s against its 12% slice and was
+ * killed mid-turn with `stopReason: "aborted"`, so it contributed zero
+ * hypotheses and the sweep silently fell back to pure file coverage. A stage
+ * that dies at its deadline does not degrade gracefully -- it returns nothing,
+ * and nothing downstream can tell that apart from "found nothing".
+ *
+ * So each stage now gets the whole run allowance from `githubRunTimeoutMs`, and
+ * the only bound on a review is that allowance itself, which an operator
+ * controls absolutely through OPENSESSION_GITHUB_RUN_TIMEOUT_MS. A review takes
+ * as long as it takes; the counts below still bound how MANY runs happen.
+ */
 export const FANOUT = {
   /**
    * Below this many changed files, stay single-pass. A 2-file PR already gets
@@ -80,18 +100,6 @@ export const FANOUT = {
    *  read-only agents as safe; reviews also run concurrently across PRs, so
    *  this stays well under that. */
   concurrency: 6,
-  /**
-   * Stage 1's share of the review's wall clock, as a fraction of the budget a
-   * single-pass review of the same diff would get. Unchanged: on the measured
-   * 34-file PR the sweep finished 12 batches in 438s against a 27-minute
-   * deadline, so this is not what is binding, and stage 1's 9/31 discovery
-   * ceiling is the next constraint — starving it would be the wrong move.
-   * Stage 2 gets VERIFY.budgetFraction (0.4) and stage 3 costs nothing, so a
-   * fanned-out review is bounded at ~1.0x the single-pass wall clock plus one
-   * straggler per stage — DOWN from ~1.6x, because the full-budget adjudication
-   * run it replaces is gone.
-   */
-  stageOneBudgetFraction: 0.6,
 };
 
 /**
@@ -227,22 +235,6 @@ export const VERIFY = {
    */
   max: 24,
   /**
-   * Stage 2's share of the wall clock a single-pass review of this diff would
-   * get. Stage 1 keeps its 0.6 unchanged — it is the binding constraint on the
-   * 9/31 discovery ceiling and there is no reason to starve it — and assembly
-   * costs nothing, so a fanned-out review now runs at ~1.0x the single-pass
-   * budget, DOWN from ~1.6x, because the full-budget adjudication run this
-   * replaces is gone.
-   */
-  budgetFraction: 0.4,
-  /**
-   * Per-verifier wall clock, as a fraction of the review budget's floor. One
-   * claim against one file is a small fraction of a whole review; the fraction
-   * (rather than a constant) keeps `OPENSESSION_GITHUB_RUN_TIMEOUT_MS` working
-   * as the operator override it already is.
-   */
-  turnFraction: 0.25,
-  /**
    * Volume guidance, lifted from the review prompt: ~3 findings per 100 changed
    * lines is where relevance starts falling.
    */
@@ -370,8 +362,6 @@ export const HYPOTHESIS = {
    * exactly the shallow-sweep failure stage 0 exists to escape.
    */
   maxFilesPerQuestion: 6,
-  /** Stage 0's share of the review's wall clock. One cheap planning turn. */
-  budgetFraction: 0.12,
 };
 
 /** One investigation question, as stage 0's agent emits it. */
