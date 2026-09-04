@@ -143,10 +143,25 @@ export function readPrState(prNumber: number, ghRepo?: string): GithubPrState | 
   const path = statePath(prNumber, ghRepo);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as GithubPrState;
+    return normalizePrState(JSON.parse(readFileSync(path, "utf-8")) as GithubPrState);
   } catch {
     return null;
   }
+}
+
+/**
+ * Repair a state object read from disk, rather than trusting it.
+ *
+ * Every writer keeps `reviewedShas` an array, but the file is on disk and things
+ * edit files: a hand-fix, a half-written truncation, an older schema. When it
+ * came back undefined the `.includes` in runReview threw, nothing caught it, and
+ * the WHOLE SERVER exited 1 — reviews down for every repo, not just the PR whose
+ * file was bad. `Restart=always` then masked the crash as runs that silently
+ * never started.
+ */
+export function normalizePrState(state: GithubPrState): GithubPrState {
+  if (!Array.isArray(state.reviewedShas)) state.reviewedShas = [];
+  return state;
 }
 
 export function getOrInitPrState(prNumber: number, headRef: string, ghRepo?: string): GithubPrState {
@@ -168,6 +183,7 @@ export function getOrInitPrState(prNumber: number, headRef: string, ghRepo?: str
 function writePrState(state: GithubPrState): void {
   state.updatedAt = new Date().toISOString();
   // Keep the reviewed-SHA list bounded.
+  if (!Array.isArray(state.reviewedShas)) state.reviewedShas = [];
   if (state.reviewedShas.length > 20) state.reviewedShas = state.reviewedShas.slice(-20);
   writeJsonAtomic(statePath(state.prNumber, state.ghRepo), state);
 }

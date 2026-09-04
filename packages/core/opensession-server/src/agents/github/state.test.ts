@@ -11,6 +11,7 @@ process.env.OPENSESSION_STATE_DIR = SCRATCH;
 const {
   activeRunCancellationRequested,
   getOrInitPrState,
+  normalizePrState,
   readPrState,
   recordReviewed,
   requestActiveRunCancellation,
@@ -116,5 +117,25 @@ describe("concurrent writers on one PR's state", () => {
     expect(activeRunCancellationRequested(pr, "review")).toBe(true);
     expect(requestActiveRunCancellation(pr, HEAD, "simplify")).toBe(false);
     expect(readPrState(pr)?.activeRun?.cancelRequestedAt).toBeTruthy();
+  });
+});
+
+describe("a malformed state object cannot take the server down", () => {
+  // The shape that crashed the deployed server: a state file whose reviewed-SHA
+  // list was gone. `.includes` on undefined threw out of runReview, nothing
+  // caught it, and the process exited 1 — reviews down for every repo, with
+  // Restart=always masking it as runs that silently never started.
+  test("a missing reviewedShas becomes an empty array", () => {
+    expect(normalizePrState({ prNumber: 1, headRef: "x" } as never).reviewedShas).toEqual([]);
+  });
+
+  test("a non-array reviewedShas becomes an empty array", () => {
+    const s = { prNumber: 1, headRef: "x", reviewedShas: "nope" } as never;
+    expect(normalizePrState(s).reviewedShas).toEqual([]);
+  });
+
+  test("a good list is left exactly as it is", () => {
+    const s = { prNumber: 1, headRef: "x", reviewedShas: ["abc"] } as never;
+    expect(normalizePrState(s).reviewedShas).toEqual(["abc"]);
   });
 });
