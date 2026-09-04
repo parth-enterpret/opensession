@@ -65,6 +65,33 @@ export interface ReviewBatch {
  * controls absolutely through OPENSESSION_GITHUB_RUN_TIMEOUT_MS. A review takes
  * as long as it takes; the counts below still bound how MANY runs happen.
  */
+/**
+ * COST, AND THE ACCOUNT RATE LIMIT THAT SETS IT.
+ *
+ * Measured on the first full production run (PR #12272, 10 files, 482 lines):
+ * 547 model calls, 33 agent sessions, 24m52s, $28.06.
+ *
+ * The dominant cost was not any single stage. It was that a Claude account is
+ * capped at 300 requests/hour, the run spent 547, and every call past the cap
+ * failed over to a second provider that then RE-RAN the same batch. We paid for
+ * both halves:
+ *
+ *     17:33:27  sweep-11  claude-sonnet-5  $1.210
+ *     17:38:02  sweep-11  gpt-5.6-sol      $1.063   <- same batch, again
+ *
+ * So call count is the budget, and these counts are how it is spent. Cutting
+ * coverage from one file per batch to three, capping hypotheses at 6 and
+ * verifiers at 12, takes a 10-file PR from 18 sweeps to about 10 and keeps the
+ * whole review inside one account-hour. Concurrency drops to 4 for the same
+ * reason: a wide fan-out does not spend fewer requests, it spends them in a
+ * burst, and the cap is per hour.
+ *
+ * One file per batch was bought in the first place because coverage without
+ * depth had been measured as worth nothing. That reasoning was sound when
+ * hypothesis batches did not exist. They do now, they carry the cross-file
+ * findings, and paying for one agent per file on top of them is buying the same
+ * coverage twice.
+ */
 export const FANOUT = {
   /**
    * Below this many changed files, stay single-pass. A 2-file PR already gets
@@ -85,7 +112,7 @@ export const FANOUT = {
    * expensive. Take it: cost is the thing we can afford to spend here, and
    * coverage without depth has now been measured as worth nothing.
    */
-  filesPerBatch: 1,
+  filesPerBatch: 3,
   /** …unless the slice is already big. A 900-line file gets its batch alone. */
   linesPerBatch: 300,
   /**
@@ -95,11 +122,11 @@ export const FANOUT = {
    * escape hatch (`summaryOnlyOverFiles`, default 80) still fires first and
    * skips the sweep entirely.
    */
-  maxBatches: 40,
+  maxBatches: 12,
   /** Batches in flight at once. The workflow runner already treats 8 parallel
    *  read-only agents as safe; reviews also run concurrently across PRs, so
    *  this stays well under that. */
-  concurrency: 6,
+  concurrency: 4,
 };
 
 /**
@@ -226,14 +253,14 @@ export const VERIFY = {
    * shorter and the wave finishes sooner. Still under the 8 parallel read-only
    * agents the workflow runner treats as safe, which reviews share across PRs.
    */
-  concurrency: 6,
+  concurrency: 4,
   /**
    * Hard ceiling on verifier runs per review. Candidates arrive severity-sorted
    * out of `dedupeFindings`, so anything past the ceiling is the least severe of
    * the list — those survive UNVERIFIED rather than dropping (see
    * `planVerifications`), and `assembleReview`'s volume cap trims the tail.
    */
-  max: 24,
+  max: 12,
   /**
    * Volume guidance, lifted from the review prompt: ~3 findings per 100 changed
    * lines is where relevance starts falling.
@@ -355,7 +382,7 @@ export const HYPOTHESIS = {
    */
   minFiles: 5,
   /** Hard ceiling on questions, i.e. on extra agent runs per review. */
-  max: 12,
+  max: 6,
   /**
    * Files a single question may claim. A question that implicates half the PR
    * is not a hypothesis, it is a restatement of the diff, and it would inherit

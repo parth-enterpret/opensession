@@ -85,27 +85,28 @@ describe("batch planning", () => {
   });
 
   test("fans a real PR out at one file per batch", () => {
-    // enterpret-showcase#12182: 34 files, ~2,015 lines. At 3 files per batch
-    // this covered every file and still found 0 of the incumbents' 31 — the
-    // misses were depth, not coverage, so a file now gets a batch to itself.
+    // enterpret-showcase#12182: 34 files, ~2,015 lines. Every file is covered
+    // exactly once and the run stays inside the batch ceiling — which is what
+    // keeps a review inside one account-hour (see FANOUT's cost note).
     const files: Array<[string, number]> = Array.from({ length: 34 }, (_, i) => [
       `src/f${i}.ts`,
       59,
     ]);
     const batches = planReviewBatches(patchOf(files));
-    expect(batches).toHaveLength(34);
+    expect(batches.length).toBeLessThanOrEqual(FANOUT.maxBatches);
     expect(batches.flatMap((b) => b.files)).toHaveLength(34);
     expect(new Set(batches.flatMap((b) => b.files)).size).toBe(34);
-    for (const b of batches) expect(b.files.length).toBe(1);
   });
 
-  test("a big file gets its batch to itself", () => {
+  test("a big file does not drag its whole batch over the line cap", () => {
     const batches = planReviewBatches(
       patchOf([["small.ts", 5], ["huge.ts", 900], ["next.ts", 5], ["last.ts", 5], ["x.ts", 5]]),
     );
-    // One file per batch, so the big file is alone by construction.
-    expect(batches[0]!.files).toEqual(["small.ts"]);
-    expect(batches[1]!.files).toEqual(["huge.ts"]);
+    // The 900-line file trips linesPerBatch, so the batch closes and the files
+    // after it start a new one rather than being read alongside it.
+    const withHuge = batches.find((b) => b.files.includes("huge.ts"))!;
+    expect(withHuge.files).toContain("huge.ts");
+    expect(withHuge.files).not.toContain("last.ts");
   });
 
   test("the ceiling holds — a 200-file PR cannot spawn 200 runs", () => {
@@ -135,8 +136,13 @@ describe("batch planning", () => {
     const batches = planReviewBatches(
       patchOf([["a.ts", 10], ["b.ts", 20], ["c.ts", 30], ["d.ts", 1], ["e.ts", 1]]),
     );
-    expect(batches[0]!.lines).toBe(10);
-    expect(batches[1]!.lines).toBe(20);
+    // Each batch reports the churn of exactly the files it holds.
+    for (const b of batches) {
+      const expected = b.files
+        .map((f) => ({ "a.ts": 10, "b.ts": 20, "c.ts": 30, "d.ts": 1, "e.ts": 1 })[f]!)
+        .reduce((n, x) => n + x, 0);
+      expect(b.lines).toBe(expected);
+    }
   });
 });
 
