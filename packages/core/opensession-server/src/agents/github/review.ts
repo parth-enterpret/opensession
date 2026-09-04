@@ -31,13 +31,15 @@ import {
   type GithubRunResult,
 } from "./run";
 import {
-  candidatesBlock,
+  assembleReview,
   dedupeFindings,
   FANOUT,
   planReviewBatches,
+  planVerifications,
+  VERIFY,
   type ReviewBatch,
 } from "./review-fanout";
-import { buildReviewPrompt, DEFAULT_REVIEW_PROMPT } from "./prompts";
+import { buildReviewPrompt, buildVerifyPrompt, DEFAULT_REVIEW_PROMPT } from "./prompts";
 import {
   getComment,
   postIssueComment,
@@ -112,7 +114,7 @@ export interface Finding {
   suggestion?: string;
 }
 
-interface ReviewOutput {
+export interface ReviewOutput {
   verdict?: string;
   confidence?: number;
   summary_markdown?: string;
@@ -276,6 +278,180 @@ async function runRecallSweep(opts: {
     `[github] review sweep on PR #${pr.number}: ${ran}/${batches.length} batches in ${Math.round((Date.now() - startedAt) / 1000)}s → ${found.length} candidates, ${candidates.length} after dedup`,
   );
   return candidates;
+}
+
+/** One verifier's verdict on one candidate. */
+export interface VerifyVerdict {
+  keep: boolean;
+  /** Why. The refutation when dropped, what was confirmed when kept. Audited. */
+  reason: string;
+  /** The candidate, with any correction the verifier made applied. */
+  finding: Finding;
+}
+
+/**
+ * Read one verifier's verdict. Refute-to-drop: anything that is not an explicit,
+ * parseable "drop" leaves the candidate in.
+ *
+ * That covers the failure cases too — a verifier that errored, timed out, or
+ * narrated without emitting the contract returns no usable verdict, and the
+ * candidate survives. A missing answer is not evidence about the code, and the
+ * alternative makes recall a function of infrastructure flakiness. It is also
+ * asymmetric in the direction we need: a stage-1 batch that fails already costs
+ * us candidates outright, so a stage-2 failure must not cost us them twice.
+ */
+export function parseVerifyOutput(text: string, candidate: Finding): VerifyVerdict {
+  const opener = (text || "").lastIndexOf("```json");
+  const json = extractBalancedJson(opener === -1 ? text || "" : text.slice(opener));
+  let o: any = null;
+  if (json) {
+    try {
+      o = JSON.parse(json);
+    } catch {
+      o = null;
+    }
+  }
+  if (!o || typeof o !== "object")
+    return { keep: true, reason: "no usable verdict from the verifier", finding: candidate };
+
+  const reason =
+    typeof o.reason === "string" && o.reason.trim() ? o.reason.trim().slice(0, 300) : "";
+  if (String(o.verdict ?? "").trim().toLowerCase() === "drop")
+    return { keep: false, reason: reason || "refuted without a stated reason", finding: candidate };
+
+  // Kept. Corrections are the verifier's other job: it has the file open, so its
+  // anchor beats the sweep's. This matters more than it looks — filterToDiff()
+  // silently discards any finding whose path:line is not in the diff, so a wrong
+  // line is a lost finding, not a cosmetic problem.
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v.trim() : undefined;
+  return {
+    keep: true,
+    reason: reason || "not refuted",
+    finding: {
+      ...candidate,
+      path: str(o.path) ?? candidate.path,
+      line: Number.isInteger(o.line) && o.line > 0 ? o.line : candidate.line,
+      severity: str(o.severity) ?? candidate.severity,
+      title: str(o.title) ?? candidate.title,
+      body: str(o.body) ?? candidate.body,
+      suggestion: str(o.suggestion) ?? candidate.suggestion,
+    },
+  };
+}
+
+export interface VerifySweepResult {
+  survivors: Finding[];
+  /** Refuted candidates and the reason given, for the review_verify_sweep audit. */
+  refuted: Array<{ path: string; line: number; title?: string; reason: string }>;
+  /** Verifier runs that errored or timed out. Their candidates still survived. */
+  errors: number;
+  /** Candidates that never got a verifier (ceiling, deadline, shutdown). Survived. */
+  unverified: number;
+}
+
+/**
+ * Stage 2 of the fanned-out review: one verifier run per candidate, fresh
+ * context, concurrent — the same shape as stage 1, pointed at one claim.
+ *
+ * The single adjudication pass this replaces cut 8 of 9 candidates on
+ * enterpret-showcase#12182 for two compounding reasons: it was one attention
+ * budget over the whole list (exactly the shape stage 1 exists to escape), and
+ * it applied a reporting bar tuned for a reviewer with a noise problem to a list
+ * produced by a reviewer biased for recall. So each verifier sees ONE candidate,
+ * never the others, is never the conversation that produced it, and defaults to
+ * keeping it (see buildVerifyPrompt).
+ *
+ * Same session-suffix and best-effort rules as runRecallSweep: distinct
+ * `sessionSuffix` per run so concurrent hosts do not discard each other,
+ * non-detached so a restart retries the whole review rather than reattaching N
+ * orphans, and nothing here can fail the review.
+ */
+async function runVerifySweep(opts: {
+  pr: PrRef;
+  details: PrAutomationDetails;
+  candidates: Finding[];
+  cwd: string;
+  model?: string;
+  title: string;
+  cancelled: () => boolean;
+}): Promise<VerifySweepResult> {
+  const { pr } = opts;
+  const { verify, unverified } = planVerifications(opts.candidates);
+  const totalLines = opts.details.additions + opts.details.deletions;
+  const deadline =
+    Date.now() + Math.round(githubRunTimeoutMs(totalLines) * VERIFY.budgetFraction);
+  const turnMs = Math.round(githubRunTimeoutMs(0) * VERIFY.turnFraction);
+  const queue = verify.map((finding, i) => ({ finding, index: i + 1 }));
+  const out: VerifySweepResult = {
+    survivors: [],
+    refuted: [],
+    errors: 0,
+    unverified: unverified.length,
+  };
+  out.survivors.push(...unverified);
+  const startedAt = Date.now();
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const item = queue.shift();
+      if (!item) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || opts.cancelled() || isShuttingDown()) {
+        // Whatever is left never got looked at. It survives, same as an error.
+        out.unverified += queue.length + 1;
+        out.survivors.push(item.finding, ...queue.map((q) => q.finding));
+        queue.length = 0;
+        return;
+      }
+      const result = await runGithubAgent({
+        prNumber: pr.number,
+        ghRepo: pr.ghRepo,
+        kind: "review",
+        sessionSuffix: `verify-${item.index}`,
+        prompt: buildVerifyPrompt({
+          pr: opts.details,
+          candidate: item.finding,
+          index: item.index,
+          total: verify.length,
+          ghRepo: pr.ghRepo,
+        }),
+        cwd: opts.cwd,
+        mode: "ask",
+        model: opts.model,
+        branch: pr.headRef,
+        title: `${opts.title} · verify ${item.index}/${verify.length}`.slice(0, 100),
+        resume: false,
+        detached: false,
+        timeoutMs: Math.min(turnMs, remaining),
+      }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
+      if (result.error) {
+        out.errors++;
+        console.warn(
+          `[github] review verify ${item.index}/${verify.length} on PR #${pr.number} failed: ${result.error}`,
+        );
+      }
+      const verdict = parseVerifyOutput(result.text, item.finding);
+      if (verdict.keep) out.survivors.push(verdict.finding);
+      else
+        out.refuted.push({
+          path: item.finding.path,
+          line: item.finding.line,
+          title: item.finding.title,
+          reason: verdict.reason,
+        });
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(VERIFY.concurrency, Math.max(queue.length, 1)) }, worker),
+  );
+  console.log(
+    `[github] review verify on PR #${pr.number}: ${opts.candidates.length} candidates in ${Math.round(
+      (Date.now() - startedAt) / 1000,
+    )}s → ${out.survivors.length} survived, ${out.refuted.length} refuted, ${out.errors} errored, ${out.unverified} unverified`,
+  );
+  return out;
 }
 
 /** Collapse duplicate findings before anything is posted, whatever produced them. */
@@ -515,12 +691,13 @@ export async function runReview(
       });
     }
 
-    // ── Stage 1: recall fan-out (review-fanout.ts) ─────────────
+    // ── Stages 1-3: fanned-out review (review-fanout.ts) ───────
     // One pass over a 34-file diff spends ~9s of attention per file and finds
     // ~1 defect where per-hunk reviewers find 30. Split the files across
     // batches so each location gets its own request and its own attention
-    // budget, bias every batch toward finding things, and let the single pass
-    // below apply the reporting bar to what they hand back.
+    // budget, and bias every batch toward finding things (stage 1). Then hand
+    // each candidate to its own verifier that tries to refute it (stage 2) and
+    // assemble whatever survives (stage 3).
     //
     // Skipped for small PRs (the existing single pass already reviews those
     // correctly, in seconds), for giant ones (summaryOnly is the pre-existing
@@ -529,6 +706,9 @@ export async function runReview(
     // the whole budget again to reach the same place.
     let candidates: Finding[] = [];
     let batches: ReviewBatch[] = [];
+    // Non-null once stages 1-3 own the outcome: the review is then assembled
+    // deterministically below and no whole-diff model pass runs at all.
+    let assembled: ReviewOutput | null = null;
     if (!recoveredReviewResult && !summaryOnly) {
       const diff = await getPrDiff(pr.headRef, pr.ghRepo || undefined).catch((e) => {
         console.warn(`[github] diff fetch for review fan-out failed on PR #${pr.number}:`, e);
@@ -562,21 +742,72 @@ export async function runReview(
         candidates: candidates.length,
       });
       // A fanned-out review runs for minutes. Keep the placeholder honest about
-      // which half it is in — the "🔄 Reviewing `sha`…" prefix is what restart
+      // which stage it is in — the "🔄 Reviewing `sha`…" prefix is what restart
       // recovery matches on, so this only ever appends after it.
-      if (placeholderId)
+      const progress = async (tail: string): Promise<void> => {
+        if (!placeholderId) return;
         await editIssueComment(
           placeholderId,
-          `${REVIEW_MARKER}\n### 🤖 ${personaName()} review\n\n🔄 Reviewing${shortSha0 ? ` \`${shortSha0}\`` : ""}… · swept ${batches.length} batch${batches.length === 1 ? "" : "es"}, ${candidates.length} candidate${candidates.length === 1 ? "" : "s"} to adjudicate · [📺 open session](${sessionUrl(pr.number, "review", pr.ghRepo)})`,
+          `${REVIEW_MARKER}\n### 🤖 ${personaName()} review\n\n🔄 Reviewing${shortSha0 ? ` \`${shortSha0}\`` : ""}… · ${tail} · [📺 open session](${sessionUrl(pr.number, "review", pr.ghRepo)})`,
           pr.ghRepo,
         ).catch(() => {});
+      };
+      const swept = `swept ${batches.length} batch${batches.length === 1 ? "" : "es"}, ${candidates.length} candidate${candidates.length === 1 ? "" : "s"}`;
+      await progress(`${swept} to verify`);
+
+      // ── Stage 2: one verifier per candidate ────────────────
+      // A sweep that produced nothing is NOT a clean bill of health — every
+      // batch may have errored — so that case falls through to the ordinary
+      // whole-diff pass below, which is exactly today's pre-fan-out behavior.
+      // The fan-out can then only ever add findings, never remove the floor.
+      if (candidates.length) {
+        if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
+        const verified = await runVerifySweep({
+          pr,
+          details,
+          candidates,
+          cwd,
+          model: reviewModel,
+          title,
+          cancelled: cancellationRequested,
+        });
+        audit({
+          msg: "review_verify_sweep",
+          pr_number: pr.number,
+          repo: pr.ghRepo || defaultRepo().ghRepo,
+          batches: batches.length,
+          candidates: candidates.length,
+          survivors: verified.survivors.length,
+          refuted: verified.refuted.length,
+          errors: verified.errors,
+          unverified: verified.unverified,
+          // The reasons are the whole point of the event: without them we cannot
+          // tell next time whether the verifier or the finder is what is short.
+          refutations: verified.refuted
+            .slice(0, 40)
+            .map((r) => `${r.path}:${r.line} — ${r.title || "(untitled)"} — ${r.reason}`),
+        });
+
+        // ── Stage 3: deterministic assembly ──────────────────
+        assembled = assembleReview(verified.survivors, {
+          changedFiles: details.changedFiles,
+          changedLines: details.additions + details.deletions,
+          batches: batches.length,
+          candidates: candidates.length,
+          refuted: verified.refuted.length,
+        });
+        await progress(
+          `${swept}, ${assembled.findings?.length || 0} verified — writing the review`,
+        );
+      }
     }
 
-    // Stage 2 (or the only stage, when the PR did not warrant a fan-out): a
-    // fresh conversation that owns the output contract. It is never one of the
-    // stage-1 batches — a model scoring its own output in its own context is a
-    // near-random filter (Greptile), so the judge gets a clean context and its
-    // own tool access to check every claim.
+    // The whole-diff single pass. It runs when the PR did not warrant a fan-out
+    // (small, giant, or restart recovery) and, deliberately, when a fan-out ran
+    // but produced no candidate at all — twelve batches that all errored look
+    // identical to a clean PR from here, and posting "approve" off that would be
+    // a false endorsement. The string is always built (it is cheap); the run
+    // below is skipped when `assembled` already owns the outcome.
     const prompt = buildReviewPrompt(base, details, isUpdate, steer, pr.ghRepo, {
       authorFamily: author?.family,
       ignoreGlobs: reviewOpts.ignoreGlobs,
@@ -589,7 +820,6 @@ export async function runReview(
         isUpdate && state.lastReviewedSha && state.lastReviewedSha !== pr.headSha
           ? state.lastReviewedSha
           : undefined,
-      candidates: candidates.length ? candidatesBlock(candidates) : undefined,
     });
 
     const persistReviewResult = (result: GithubRunResult) => {
@@ -619,7 +849,16 @@ export async function runReview(
     }
     console.log(`[github] Reviewing PR #${pr.number} @ ${pr.headSha.slice(0, 7)} (${isUpdate ? "update" : "initial"})`);
     let finalResult: GithubRunResult;
-    if (recoveredReviewResult) {
+    if (assembled) {
+      // Stages 1-3 already produced the review. There is deliberately no model
+      // call here: re-running the reporting bar over survivors a verifier has
+      // already checked one at a time is precisely the bottleneck this replaces,
+      // and any model that reaches the findings list at all can cut it.
+      finalResult = { bksId, text: "", model: reviewModel };
+      console.log(
+        `[github] PR #${pr.number} review assembled from ${assembled.findings?.length || 0} verified finding(s); no adjudication pass`,
+      );
+    } else if (recoveredReviewResult) {
       finalResult = { bksId, ...recoveredReviewResult };
       console.log(
         `[github] Reusing the durable model result for PR #${pr.number} after restart`,
@@ -657,7 +896,7 @@ export async function runReview(
     }
 
     if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
-    let parsed = withDedupedFindings(parseReviewOutput(finalResult.text, cwd));
+    let parsed = assembled ?? withDedupedFindings(parseReviewOutput(finalResult.text, cwd));
     // A repair turn can only re-express what the first turn already produced.
     // When that turn emitted nothing at all, the repair resumes an engine
     // session with no inspection in it and the model says so, at length, in
@@ -665,11 +904,11 @@ export async function runReview(
     // outputs) are present in this conversation to synthesize". That output
     // then reads as a completed review of the PR, which it is not. A run that
     // said nothing is not repairable; report it as the failure it is.
-    const producedNothing = !finalResult.error && !finalResult.text.trim();
+    const producedNothing = !assembled && !finalResult.error && !finalResult.text.trim();
     // Fable occasionally declares a progress narration complete before it emits
     // the review contract. Give the same engine session one bounded chance to
     // turn its completed inspection into a postable verdict.
-    if (!finalResult.error && !producedNothing && !isCompleteReviewOutput(parsed)) {
+    if (!assembled && !finalResult.error && !producedNothing && !isCompleteReviewOutput(parsed)) {
       if (isShuttingDown()) {
         preserveRecovery = true;
         console.log(`[github] PR #${pr.number} review repair parked for restart`);

@@ -1,13 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
-  candidatesBlock,
+  assembleReview,
   changedFilesFromPatch,
   dedupeFindings,
   FANOUT,
   planReviewBatches,
+  planVerifications,
+  VERIFY,
 } from "./review-fanout";
-import { buildReviewPrompt } from "./prompts";
-import { isCompleteReviewOutput, parseReviewOutput } from "./review";
+import { buildReviewPrompt, buildVerifyPrompt } from "./prompts";
+import { isCompleteReviewOutput, parseReviewOutput, parseVerifyOutput } from "./review";
 import type { Finding } from "./review";
 import type { PrDetails } from "../../server/pr-info";
 
@@ -188,35 +190,40 @@ const prDetails = {
   comments: [],
 } as unknown as PrDetails;
 
-describe("the two stages keep the output contract", () => {
+describe("the three stages keep the output contract", () => {
   test("stage 1 scopes to its files and overrides the reporting bar", () => {
     const p = buildReviewPrompt("BASE", prDetails, false, undefined, "o/r", {
       batch: { files: ["src/a.ts", "src/b.ts"], index: 2, total: 12 },
     });
-    expect(p).toContain("stage 1 of 2");
+    expect(p).toContain("stage 1 of 3");
     expect(p).toContain("`src/a.ts`");
     expect(p).toContain("-- 'src/a.ts' 'src/b.ts'");
     expect(p).toContain("the bias is recall");
     // The contract is unchanged, so parseReviewOutput reads a batch's output.
     expect(p).toContain('"summary_markdown"');
-    expect(p.indexOf("stage 1 of 2")).toBeGreaterThan(p.indexOf("BASE"));
+    expect(p.indexOf("stage 1 of 3")).toBeGreaterThan(p.indexOf("BASE"));
   });
 
-  test("stage 2 carries the candidates and is not a batch", () => {
-    const p = buildReviewPrompt("BASE", prDetails, false, undefined, "o/r", {
-      candidates: candidatesBlock([
-        { path: "src/a.ts", line: 10, severity: "P1", title: "Null deref", body: "Boom." },
-      ]),
-    });
-    expect(p).toContain("stage 2 of 2");
-    expect(p).toContain("`src/a.ts:10` [P1] — Null deref");
-    expect(p).not.toContain("stage 1 of 2");
-  });
-
-  test("no fan-out means neither section appears", () => {
+  test("no fan-out means the batch section does not appear", () => {
     const p = buildReviewPrompt("BASE", prDetails, false, undefined, "o/r", {});
-    expect(p).not.toContain("stage 1 of 2");
-    expect(p).not.toContain("stage 2 of 2");
+    expect(p).not.toContain("stage 1 of 3");
+  });
+
+  test("the verifier prompt carries one candidate and not the reporting bar", () => {
+    const p = buildVerifyPrompt({
+      pr: prDetails,
+      candidate: { path: "src/a.ts", line: 10, severity: "P1", title: "Null deref", body: "Boom." },
+      index: 3,
+      total: 9,
+      ghRepo: "o/r",
+    });
+    expect(p).toContain("`src/a.ts:10` [P1] — Null deref");
+    expect(p).toContain("(3 of 9)");
+    expect(p).toContain("try to disprove");
+    expect(p).toContain("KEEP is the default");
+    // The seven-condition bar tuned for a noise problem must NOT come along.
+    expect(p).not.toContain("The reporting bar");
+    expect(p).not.toContain("What NOT to flag");
   });
 
   test("merged batch output still parses as a complete review", () => {
@@ -240,6 +247,148 @@ describe("the two stages keep the output contract", () => {
     };
     expect(isCompleteReviewOutput(merged)).toBe(true);
     expect(merged.findings.map((f) => f.path)).toEqual(["src/a.ts", "src/b.ts"]);
-    expect(candidatesBlock(merged.findings)).toContain("2. `src/b.ts:4` [P2] — Wrong default");
+  });
+});
+
+describe("stage 2 — refute to drop", () => {
+  const candidate: Finding = {
+    path: "src/a.ts",
+    line: 10,
+    severity: "P2",
+    title: "Null deref on empty items",
+    body: "When items is empty, it throws.",
+  };
+  const out = (o: unknown) => `Read the file.\n\n\`\`\`json\n${JSON.stringify(o)}\n\`\`\``;
+
+  test("a refuted candidate drops, carrying its reason", () => {
+    const v = parseVerifyOutput(
+      out({ verdict: "drop", reason: "src/a.ts:4 guards `items.length` before the call." }),
+      candidate,
+    );
+    expect(v.keep).toBe(false);
+    expect(v.reason).toContain("src/a.ts:4 guards");
+  });
+
+  test("a drop with no reason still drops, and says so for the audit", () => {
+    expect(parseVerifyOutput(out({ verdict: "drop" }), candidate)).toMatchObject({
+      keep: false,
+      reason: "refuted without a stated reason",
+    });
+  });
+
+  test("an unrefuted candidate survives", () => {
+    const v = parseVerifyOutput(out({ verdict: "keep", reason: "Traced it from the handler." }), candidate);
+    expect(v.keep).toBe(true);
+    expect(v.finding).toEqual(candidate);
+  });
+
+  test("a keep re-anchors and rewrites the candidate", () => {
+    // A wrong line is a lost finding — filterToDiff discards off-diff anchors.
+    const v = parseVerifyOutput(
+      out({
+        verdict: "keep",
+        reason: "Real, but it fires at line 42.",
+        line: 42,
+        severity: "P1",
+        title: "Null deref",
+        body: "When items is empty, render() dereferences items[0].",
+        suggestion: "if (!items.length) return null;",
+      }),
+      candidate,
+    );
+    expect(v.finding).toEqual({
+      path: "src/a.ts",
+      line: 42,
+      severity: "P1",
+      title: "Null deref",
+      body: "When items is empty, render() dereferences items[0].",
+      suggestion: "if (!items.length) return null;",
+    });
+  });
+
+  test("a verifier that errors, times out, or narrates leaves the candidate in", () => {
+    // Refute-to-drop: no answer is not evidence about the code, and the other
+    // way round makes recall a function of infrastructure flakiness.
+    for (const text of ["", "I ran out of time before I could trace the caller.", "{not json"]) {
+      const v = parseVerifyOutput(text, candidate);
+      expect(v.keep).toBe(true);
+      expect(v.finding).toEqual(candidate);
+    }
+    expect(parseVerifyOutput("", candidate).reason).toBe("no usable verdict from the verifier");
+  });
+
+  test("an unrecognised verdict is not a refutation", () => {
+    expect(parseVerifyOutput(out({ verdict: "unsure", reason: "hmm" }), candidate).keep).toBe(true);
+  });
+
+  test("the ceiling holds, and the overflow survives unverified", () => {
+    const many: Finding[] = Array.from({ length: VERIFY.max + 7 }, (_, i) => ({
+      ...candidate,
+      line: i + 1,
+    }));
+    const { verify, unverified } = planVerifications(many);
+    expect(verify).toHaveLength(VERIFY.max);
+    expect(unverified).toHaveLength(7);
+    // Candidates arrive severity-sorted, so the overflow is the least severe.
+    expect(verify.concat(unverified)).toEqual(many);
+  });
+});
+
+describe("stage 3 — deterministic assembly", () => {
+  const f = (over: Partial<Finding>): Finding => ({
+    path: "src/a.ts",
+    line: 10,
+    body: "Boom.",
+    ...over,
+  });
+  const ctx = { changedFiles: 34, changedLines: 2015, batches: 12, candidates: 9, refuted: 4 };
+
+  test("survivors become a postable review with no model call", () => {
+    const r = assembleReview([f({ line: 1, severity: "P2", title: "Wrong default" })], ctx);
+    expect(isCompleteReviewOutput(r)).toBe(true);
+    expect(r.verdict).toBe("comment");
+    expect(r.findings).toHaveLength(1);
+    expect(r.summary_markdown).toContain("12 independent passes");
+    expect(r.summary_markdown).toContain("9 candidates");
+    expect(r.summary_markdown).toContain("4 of them refuted");
+  });
+
+  test("a P1 survivor blocks the merge", () => {
+    const r = assembleReview(
+      [f({ line: 1, severity: "P2", title: "Slow" }), f({ line: 2, severity: "P1", title: "Auth bypass" })],
+      ctx,
+    );
+    expect(r.verdict).toBe("request_changes");
+    expect(r.confidence).toBe(2);
+    expect(r.findings![0]!.title).toBe("Auth bypass");
+  });
+
+  test("nothing surviving is a complete review, and says what was checked", () => {
+    const r = assembleReview([], ctx);
+    expect(isCompleteReviewOutput(r)).toBe(true);
+    expect(r.verdict).toBe("approve");
+    expect(r.findings).toEqual([]);
+    expect(r.summary_markdown).toContain("no candidate survived");
+  });
+
+  test("the volume bar trims the least severe tail on a small diff", () => {
+    const survivors = Array.from({ length: 9 }, (_, i) =>
+      f({ line: i + 1, severity: i === 0 ? "P1" : "P2", title: `Finding ${i}` }),
+    );
+    const r = assembleReview(survivors, { ...ctx, changedLines: 60, candidates: 9, refuted: 0 });
+    expect(r.findings).toHaveLength(VERIFY.minFindings);
+    expect(r.findings![0]!.title).toBe("Finding 0");
+    expect(r.summary_markdown).toContain("4 further findings held back");
+  });
+
+  test("a big diff is not trimmed", () => {
+    const survivors = Array.from({ length: 9 }, (_, i) => f({ line: i + 1, title: `Finding ${i}` }));
+    expect(assembleReview(survivors, ctx).findings).toHaveLength(9);
+  });
+
+  test("assembly dedups what the verifiers handed back", () => {
+    // Two verifiers can re-anchor two copies of one defect onto the same line.
+    const r = assembleReview([f({ line: 7, title: "Null deref" }), f({ line: 7, title: "Null deref" })], ctx);
+    expect(r.findings).toHaveLength(1);
   });
 });
