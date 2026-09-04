@@ -44,13 +44,19 @@ export const FANOUT = {
    */
   minFiles: 5,
   /**
-   * Files per batch. One file per batch is the strongest signal and the most
-   * expensive; 3 keeps a batch's slice small enough that the model reads each
-   * file whole, while cutting the run count (and the fixed per-run prompt cost)
-   * by a third. Files arrive in git's own diff order, which groups a directory
-   * together, so a batch is usually related code rather than a random sample.
+   * Files per batch. Measured 2026-09-04 on enterpret-showcase#12182 (34 files,
+   * 2,015 lines): at 3 files per batch the sweep covered every file — 12/12
+   * batches, all 34 files seen — and still found 0 of the 31 defects the
+   * incumbent reviewers found. Their four densest files yielded 14 findings to
+   * them and none to us, so the misses were not coverage. ~170 lines a batch is
+   * roughly 7x the attention density of a single whole-diff pass, and that was
+   * not enough to change what got noticed.
+   *
+   * One file per batch is the strongest signal available and the most
+   * expensive. Take it: cost is the thing we can afford to spend here, and
+   * coverage without depth has now been measured as worth nothing.
    */
-  filesPerBatch: 3,
+  filesPerBatch: 1,
   /** …unless the slice is already big. A 900-line file gets its batch alone. */
   linesPerBatch: 300,
   /**
@@ -60,11 +66,11 @@ export const FANOUT = {
    * escape hatch (`summaryOnlyOverFiles`, default 80) still fires first and
    * skips the sweep entirely.
    */
-  maxBatches: 12,
+  maxBatches: 40,
   /** Batches in flight at once. The workflow runner already treats 8 parallel
    *  read-only agents as safe; reviews also run concurrently across PRs, so
    *  this stays well under that. */
-  concurrency: 4,
+  concurrency: 6,
   /**
    * Stage 1's share of the review's wall clock, as a fraction of the budget a
    * single-pass review of the same diff would get. Unchanged: on the measured

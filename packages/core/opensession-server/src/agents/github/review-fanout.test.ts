@@ -77,26 +77,28 @@ describe("batch planning", () => {
     expect(planReviewBatches(four)).toEqual([]);
   });
 
-  test("fans a real PR out at three files per batch", () => {
-    // enterpret-showcase#12182: 34 files, ~2,015 lines, 1 finding single-pass.
+  test("fans a real PR out at one file per batch", () => {
+    // enterpret-showcase#12182: 34 files, ~2,015 lines. At 3 files per batch
+    // this covered every file and still found 0 of the incumbents' 31 — the
+    // misses were depth, not coverage, so a file now gets a batch to itself.
     const files: Array<[string, number]> = Array.from({ length: 34 }, (_, i) => [
       `src/f${i}.ts`,
       59,
     ]);
     const batches = planReviewBatches(patchOf(files));
-    expect(batches).toHaveLength(12);
-    expect(batches.map((b) => b.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(batches).toHaveLength(34);
     expect(batches.flatMap((b) => b.files)).toHaveLength(34);
     expect(new Set(batches.flatMap((b) => b.files)).size).toBe(34);
-    for (const b of batches) expect(b.files.length).toBeLessThanOrEqual(3);
+    for (const b of batches) expect(b.files.length).toBe(1);
   });
 
   test("a big file gets its batch to itself", () => {
     const batches = planReviewBatches(
       patchOf([["small.ts", 5], ["huge.ts", 900], ["next.ts", 5], ["last.ts", 5], ["x.ts", 5]]),
     );
-    expect(batches[0]!.files).toEqual(["small.ts", "huge.ts"]);
-    expect(batches[1]!.files[0]).toBe("next.ts");
+    // One file per batch, so the big file is alone by construction.
+    expect(batches[0]!.files).toEqual(["small.ts"]);
+    expect(batches[1]!.files).toEqual(["huge.ts"]);
   });
 
   test("the ceiling holds — a 200-file PR cannot spawn 200 runs", () => {
@@ -126,8 +128,8 @@ describe("batch planning", () => {
     const batches = planReviewBatches(
       patchOf([["a.ts", 10], ["b.ts", 20], ["c.ts", 30], ["d.ts", 1], ["e.ts", 1]]),
     );
-    expect(batches[0]!.lines).toBe(60);
-    expect(batches[1]!.lines).toBe(2);
+    expect(batches[0]!.lines).toBe(10);
+    expect(batches[1]!.lines).toBe(20);
   });
 });
 
