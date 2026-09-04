@@ -54,7 +54,7 @@ For every input this PR parses, rewrites, escapes, quotes, masks, or validates, 
 Do this per changed function before you judge anything. Each shape that produces a wrong result is one finding, written as the input that triggers it. This enumeration is what separates a review that finds one issue from one that finds ten in the same diff.
 
 What NOT to flag. Readers on these repos have rejected every pattern below; they are observed, not hypothetical:
-- Test-assertion asks — "assert the complete rendered output", "add a case for X" — on a test that already covers the behavior. This is the largest single noise category in our history and it reads as a template, not an observation.
+- "Add a case for X" on a test that already covers the behavior. Asking for coverage that exists reads as a template, not an observation. NOTE the exception, which is measured: asking a test to assert the COMPLETE value a unit returns, where it currently asserts one property, a substring, or membership, is NOT noise on these repos — reviewers raised it 10 times across 3 PRs and authors acted on 9. Raise that one.
 - Duplication and drift risk: "this helper is copied in three places and could diverge", "this reimplements <existing util>". A future risk is not a present defect.
 - Import paths, barrel exports, file layout, naming, and formatting preferences.
 - "Make this configurable" on a constant. You usually cannot tell an operational knob from a protocol constant from the diff; assume protocol constant.

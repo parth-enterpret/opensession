@@ -198,8 +198,13 @@ describe("rewritten review prompt sections", () => {
 
   test("carries the What NOT to flag block built from our own rejected findings", () => {
     expect(DEFAULT_REVIEW_PROMPT).toContain("What NOT to flag");
-    // The template that produced 16 of 32 noise findings in the incumbent corpus.
-    expect(DEFAULT_REVIEW_PROMPT).toContain("assert the complete rendered output");
+    // Template coverage asks stay banned. The "assert the COMPLETE value" ask
+    // does NOT: it is 16 of 32 findings the corpus labels noise, but authors
+    // acted on 15 of those 16, and the harvested repo convention records 10
+    // raises with 9 acted upon. Banning it made acceptance criteria 3.1 (>=70%
+    // recall against acted-upon findings) unsatisfiable against 3.8.
+    expect(DEFAULT_REVIEW_PROMPT).toContain('"Add a case for X"');
+    expect(DEFAULT_REVIEW_PROMPT).toContain("assert the COMPLETE value");
     expect(DEFAULT_REVIEW_PROMPT).toContain("Make this configurable");
     expect(DEFAULT_REVIEW_PROMPT).toContain("Process and policy asks");
   });
