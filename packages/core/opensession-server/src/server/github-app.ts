@@ -53,6 +53,7 @@ const g = globalThis as {
   __ghAppTokenCacheRead?: AppTokenCache | null;
   __ghAppTokenCacheWrite?: AppTokenCache | null;
   __ghAppTokenWarned?: boolean;
+  __ghDevTokenWarned?: boolean;
   __ghAppLastMintOk?: boolean;
   __ghAppLastMintIdentity?: string;
 };
@@ -206,12 +207,51 @@ export async function githubAppInstallationToken(
   }
 }
 
-/** The selected GitHub credential for REST/GraphQL calls. GitHub App
- * installation tokens are the only service credential. */
+/**
+ * A personal access token to use when no GitHub App is configured.
+ *
+ * The App is the right service credential: its installation tokens are
+ * short-lived, scoped to one repository, and act as the bot rather than as a
+ * person. Nothing about that changes. But the App is also the ONLY credential
+ * the server accepts, and its private key cannot be checked out, which makes
+ * every GitHub-backed path — reviews, PR info, the whole agent surface —
+ * unrunnable on a laptop and unrunnable in CI without minting an App first.
+ *
+ * So: an explicit, opt-in escape hatch for development. It is deliberately its
+ * own variable rather than reusing `GITHUB_TOKEN`, because `GITHUB_TOKEN` is set
+ * by GitHub Actions and by many shells already, and silently picking that up
+ * would mean a misconfigured production host quietly falling back to whatever
+ * ambient token it happened to have instead of failing loudly.
+ *
+ * Two consequences worth knowing before you set it. Writes are attributed to the
+ * token's owner, not to the bot. And a PAT is not repository-scoped, so it
+ * carries every permission that user has — use a fine-grained token limited to
+ * the repositories you are testing against.
+ */
+function githubDevToken(): string | null {
+  const token = (process.env.OPENSESSION_GITHUB_TOKEN || "").trim();
+  return token || null;
+}
+
+/** The selected GitHub credential for REST/GraphQL calls. A GitHub App
+ * installation token when one is configured; otherwise the development PAT in
+ * OPENSESSION_GITHUB_TOKEN, if the operator set one. */
 export async function githubToken(
   opts: { write?: boolean } = {},
 ): Promise<string | null> {
-  if (!githubConfiguredCredential()) return null;
+  if (!githubConfiguredCredential()) {
+    const dev = githubDevToken();
+    if (dev && !g.__ghDevTokenWarned) {
+      g.__ghDevTokenWarned = true;
+      // Loud on purpose: a host that meant to use the App and silently used a
+      // person's PAT instead is a misconfiguration you want to see in the log.
+      console.warn(
+        "[github-app] no GitHub App configured — using OPENSESSION_GITHUB_TOKEN. " +
+          "Writes will be attributed to that token's owner, not to the bot.",
+      );
+    }
+    return dev;
+  }
   return githubAppInstallationToken(opts);
 }
 
