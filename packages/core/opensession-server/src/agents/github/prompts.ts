@@ -184,6 +184,12 @@ export function buildReviewPrompt(
     /** Head SHA of our last completed review, when it differs from the current
      *  head — enables the "what changed since your review" delta hint. */
     lastReviewedSha?: string;
+    /** Stage 1 of the fanned-out review: this run sees only these files and is
+     *  biased toward recall (review-fanout.ts). */
+    batch?: { files: string[]; index: number; total: number };
+    /** Stage 2 of the fanned-out review: the unfiltered candidate list stage 1
+     *  produced, rendered by candidatesBlock(). */
+    candidates?: string;
   },
 ): string {
   const header = isUpdate
@@ -198,6 +204,48 @@ export function buildReviewPrompt(
 
 Your checkout is pinned to the PR's HEAD and both refs are fetched. Run
 \`git diff --find-renames origin/${pr.baseRefName}...HEAD\` to inspect the complete PR diff, then use Read/Grep on the checkout for surrounding context. Do not use a working-tree-only \`git diff\`; this checkout is clean.${deltaHint}`;
+
+  // ── Two-stage review (review-fanout.ts) ────────────────────
+  // Both sections land AFTER the reporting bar in the assembled prompt, and the
+  // stage-1 one deliberately overrides it: the bar decides what gets POSTED,
+  // and stage 2 is where it is applied. A single prompt asked to be both
+  // thorough and quiet resolves the tension by being quiet about hard things.
+  const batchSection = extras?.batch
+    ? `## This run is stage 1 of 2 — recall sweep (batch ${extras.batch.index} of ${extras.batch.total})
+
+You are reviewing ONLY the files listed below. Sibling runs cover the rest of the PR, and a SEPARATE later pass — a different conversation, which cannot see yours — applies the reporting bar above and decides what actually reaches the PR. Nothing you write here is posted unfiltered.
+
+Your files:
+${extras.batch.files.map((f) => `- \`${f}\``).join("\n")}
+
+Start with \`git diff --find-renames origin/${pr.baseRefName}...HEAD -- ${extras.batch.files
+        .map((f) => `'${f}'`)
+        .join(" ")}\`, then read each of those files whole. Take them one at a time and finish one before starting the next. You have the entire checkout read-only, so Grep and Read anything else you need.
+
+In THIS pass the bias is recall, not restraint:
+- Write down every candidate you notice, including ones you are not certain about. A candidate you never wrote down is one the filter never gets to consider.
+- Still check each one against the code on disk before you describe it. Uncertainty is fine and expected; a fabricated line number or an invented call path is not — it wastes the filter's whole budget. When you could not confirm something, say so in the body.
+- Blast radius counts even when the caller lives in another batch's files. Grep the callers of everything your files change.
+- Do not curate. Do not stop because the count feels high. Do not drop a candidate for being minor — the next pass cuts those, and it cuts them better than you can from here.
+
+Do not write a PR summary: only \`findings\` is read from this run. Set \`verdict\` to "comment" and put a single sentence in \`summary_markdown\`.`
+    : "";
+
+  const candidatesSection = extras?.candidates
+    ? `## This run is stage 2 of 2 — adjudication
+
+A recall sweep already read this PR one small slice at a time and produced the candidates below. It was told to write down everything it noticed, so the list is unfiltered: some entries are real defects, some are wrong, and some are true but not worth posting. You did not see its reasoning and its wording carries no authority.
+
+Deciding what actually goes out is this run's job:
+- Verify each candidate against the code on disk yourself — the file, the line, and the failure scenario it claims. If it does not survive that, drop it.
+- Then apply the reporting bar at the top of this prompt to whatever is left.
+- Rewrite every finding you keep in your own words, precondition first, and re-anchor \`path\`/\`line\` yourself; the candidate's anchor may be wrong. A candidate whose defect is real but whose line is wrong is a keep with a corrected line, not a drop.
+- Add anything the sweep missed, held to the same bar. You have the whole diff.
+- Dropping most of the list is a normal outcome, and so is keeping most of it. Judge each one on its own; do not aim at a count.
+
+Candidates:
+${extras.candidates}`
+    : "";
 
   const ignoreSection = extras?.ignoreGlobs?.length
     ? `Ignore changes under these paths entirely (generated/vendored — the repo excludes them from review; emit no findings there):\n${extras.ignoreGlobs.map((g) => `- \`${g}\``).join("\n")}`
@@ -221,6 +269,8 @@ Your checkout is pinned to the PR's HEAD and both refs are fetched. Run
     ignoreSection,
     summaryOnlySection,
     diffSection,
+    batchSection,
+    candidatesSection,
     REVIEW_OUTPUT_CONTRACT.replaceAll("<PR_NUMBER>", String(pr.number)),
   ]
     .filter((s) => s !== "")

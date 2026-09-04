@@ -114,9 +114,21 @@ export type GithubRunKind =
   | "adversarial"
   | "followup";
 
-/** Stable, deterministic opensession session id per PR + behavior (one resumable session each). */
-export function bksIdFor(prNumber: number, kind: GithubRunKind, ghRepo?: string): string {
-  return `bks-ghpr-${prKey(prNumber, ghRepo)}-${kind}`;
+/**
+ * Stable, deterministic opensession session id per PR + behavior (one resumable
+ * session each). `suffix` splits one behavior into sibling sessions that run at
+ * the same time — the review's recall sweep gives each batch its own id, because
+ * every per-session structure here (session file, run journal, detached-host
+ * recovery marker) is keyed by this string and concurrent runs sharing one id
+ * discard each other's hosts.
+ */
+export function bksIdFor(
+  prNumber: number,
+  kind: GithubRunKind,
+  ghRepo?: string,
+  suffix?: string,
+): string {
+  return `bks-ghpr-${prKey(prNumber, ghRepo)}-${kind}${suffix ? `-${suffix}` : ""}`;
 }
 
 const UI_BASE =
@@ -264,6 +276,13 @@ export interface GithubRunOpts {
   /** Changed lines (additions + deletions) this turn has to get through, for
    *  the wall-clock budget. Omitted = the floor. */
   changedLines?: number;
+  /** Absolute wall-clock budget for this turn, overriding the `changedLines`
+   *  scale. Used by the review's recall sweep to fit N batches inside a stage
+   *  deadline instead of giving each batch a whole review's budget. */
+  timeoutMs?: number;
+  /** Sibling-session discriminator (see bksIdFor). Concurrent runs of the same
+   *  behavior on one PR MUST each pass a distinct suffix. */
+  sessionSuffix?: string;
   /** Run this turn in a detached host so it survives a service restart. */
   detached?: boolean;
   /** Reattach the detached turn left by this behavior's persisted recovery marker. */
@@ -455,7 +474,7 @@ export async function* withRunDeadline<T>(
 
 /** Run one headless turn for a PR behavior; returns the agent's accumulated text. */
 export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResult> {
-  const bksId = bksIdFor(opts.prNumber, opts.kind, opts.ghRepo);
+  const bksId = bksIdFor(opts.prNumber, opts.kind, opts.ghRepo, opts.sessionSuffix);
   const startedAt = new Date();
 
   // Group this and the PR's other sessions under one Project folder.
@@ -531,7 +550,10 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
   let errorMsg = "";
   let recoveryUncertain = false;
   let timedOut = false;
-  const timeoutMs = githubRunTimeoutMs(opts.changedLines);
+  const timeoutMs =
+    Number.isFinite(opts.timeoutMs) && opts.timeoutMs! > 0
+      ? opts.timeoutMs!
+      : githubRunTimeoutMs(opts.changedLines);
 
   // Write the file before the engine boots, not on its first event: the run's
   // session link is already public by now (see announceGithubRun), and booting

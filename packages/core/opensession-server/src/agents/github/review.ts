@@ -24,11 +24,19 @@ import {
 import {
   announceGithubRun,
   discardRecoverableGithubRun,
+  githubRunTimeoutMs,
   GithubRunRecoveryUncertainError,
   runGithubAgent,
   sessionUrl,
   type GithubRunResult,
 } from "./run";
+import {
+  candidatesBlock,
+  dedupeFindings,
+  FANOUT,
+  planReviewBatches,
+  type ReviewBatch,
+} from "./review-fanout";
 import { buildReviewPrompt, DEFAULT_REVIEW_PROMPT } from "./prompts";
 import {
   getComment,
@@ -173,6 +181,108 @@ const SEV_EMOJI: Record<string, string> = {
   p0: "🔴", p1: "🔴", p2: "🟠", p3: "⚪",
   high: "🔴", medium: "🟠", low: "⚪",
 };
+
+/**
+ * Stage 1 of the fanned-out review: run the review agent once per batch and
+ * return the merged, deduplicated candidate list.
+ *
+ * Concurrency requires distinct session ids. Every per-session structure in
+ * run.ts — the session file, the run journal, the detached-host recovery marker
+ * — is keyed by `bksIdFor(pr, kind)`, and two concurrent runs sharing one id
+ * discard each other's hosts on startup. So each batch gets a `sessionSuffix`,
+ * and batches run NON-detached: restart recovery is the main pass's property,
+ * and a server restart mid-sweep simply retries the whole review on the next
+ * delivery rather than reattaching twelve orphaned hosts.
+ *
+ * Best-effort throughout. A batch that errors, times out, or emits nothing
+ * contributes no candidates and never fails the review — the worst case is the
+ * single-pass result we already get today.
+ */
+async function runRecallSweep(opts: {
+  pr: PrRef;
+  details: PrAutomationDetails;
+  base: string;
+  batches: ReviewBatch[];
+  cwd: string;
+  model?: string;
+  title: string;
+  steer?: string;
+  authorFamily?: string | null;
+  ignoreGlobs: string[];
+  learnedRules: string;
+  cancelled: () => boolean;
+}): Promise<Finding[]> {
+  const { pr, batches } = opts;
+  // The whole stage shares one deadline, sized as a fraction of what a
+  // single-pass review of this diff would get; each batch is additionally
+  // capped at its own share of that. Total review wall clock therefore stays
+  // bounded at roughly 1.6x the single-pass budget plus one straggler, instead
+  // of multiplying by the batch count.
+  const totalLines = opts.details.additions + opts.details.deletions;
+  const deadline =
+    Date.now() + Math.round(githubRunTimeoutMs(totalLines) * FANOUT.stageOneBudgetFraction);
+  const queue = [...batches];
+  const found: Finding[] = [];
+  let ran = 0;
+  const startedAt = Date.now();
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const batch = queue.shift();
+      if (!batch) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || opts.cancelled() || isShuttingDown()) {
+        queue.length = 0;
+        return;
+      }
+      ran++;
+      const result = await runGithubAgent({
+        prNumber: pr.number,
+        ghRepo: pr.ghRepo,
+        kind: "review",
+        sessionSuffix: `sweep-${batch.index}`,
+        prompt: buildReviewPrompt(opts.base, opts.details, false, opts.steer, pr.ghRepo, {
+          authorFamily: opts.authorFamily,
+          ignoreGlobs: opts.ignoreGlobs,
+          intent: prIntentSection(opts.details),
+          learnedRules: opts.learnedRules,
+          batch: { files: batch.files, index: batch.index, total: batches.length },
+        }),
+        cwd: opts.cwd,
+        mode: "ask",
+        model: opts.model,
+        branch: pr.headRef,
+        title: `${opts.title} · sweep ${batch.index}/${batches.length}`.slice(0, 100),
+        // Each batch is its own context by construction; nothing to resume.
+        resume: false,
+        detached: false,
+        timeoutMs: Math.min(githubRunTimeoutMs(batch.lines), remaining),
+      }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
+      if (result.error) {
+        console.warn(
+          `[github] review sweep batch ${batch.index}/${batches.length} on PR #${pr.number} failed: ${result.error}`,
+        );
+      }
+      const parsed = parseReviewOutput(result.text, opts.cwd);
+      if (parsed?.findings?.length) found.push(...parsed.findings);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(FANOUT.concurrency, batches.length) }, worker),
+  );
+  const candidates = dedupeFindings(found);
+  console.log(
+    `[github] review sweep on PR #${pr.number}: ${ran}/${batches.length} batches in ${Math.round((Date.now() - startedAt) / 1000)}s → ${found.length} candidates, ${candidates.length} after dedup`,
+  );
+  return candidates;
+}
+
+/** Collapse duplicate findings before anything is posted, whatever produced them. */
+function withDedupedFindings(parsed: ReviewOutput | null): ReviewOutput | null {
+  if (!parsed?.findings?.length) return parsed;
+  return { ...parsed, findings: dedupeFindings(parsed.findings) };
+}
 
 export async function runReview(
   pr: PrRef,
@@ -384,19 +494,6 @@ export async function runReview(
       : "";
 
     const base = (config.prompt || "").trim() || DEFAULT_REVIEW_PROMPT;
-    const prompt = buildReviewPrompt(base, details, isUpdate, steer, pr.ghRepo, {
-      authorFamily: author?.family,
-      ignoreGlobs: reviewOpts.ignoreGlobs,
-      summaryOnly,
-      intent: prIntentSection(details),
-      discussion: prDiscussionSection(details, isGithubBotLogin, REVIEW_MARKER),
-      priorReview,
-      learnedRules: learnedRulesSection(pr.ghRepo),
-      lastReviewedSha:
-        isUpdate && state.lastReviewedSha && state.lastReviewedSha !== pr.headSha
-          ? state.lastReviewedSha
-          : undefined,
-    });
 
     // Model inversion: never review code with the model family that wrote it
     // (shared blind spots — see model-inversion.ts). Falls back to the
@@ -417,6 +514,83 @@ export async function runReview(
         source: inversion.source,
       });
     }
+
+    // ── Stage 1: recall fan-out (review-fanout.ts) ─────────────
+    // One pass over a 34-file diff spends ~9s of attention per file and finds
+    // ~1 defect where per-hunk reviewers find 30. Split the files across
+    // batches so each location gets its own request and its own attention
+    // budget, bias every batch toward finding things, and let the single pass
+    // below apply the reporting bar to what they hand back.
+    //
+    // Skipped for small PRs (the existing single pass already reviews those
+    // correctly, in seconds), for giant ones (summaryOnly is the pre-existing
+    // escape hatch and fires first), and on restart recovery, where the
+    // durable model result already exists and re-running the sweep would spend
+    // the whole budget again to reach the same place.
+    let candidates: Finding[] = [];
+    let batches: ReviewBatch[] = [];
+    if (!recoveredReviewResult && !summaryOnly) {
+      const diff = await getPrDiff(pr.headRef, pr.ghRepo || undefined).catch((e) => {
+        console.warn(`[github] diff fetch for review fan-out failed on PR #${pr.number}:`, e);
+        return null;
+      });
+      batches = diff?.patch
+        ? planReviewBatches(diff.patch, (path) => pathIgnored(path, reviewOpts))
+        : [];
+    }
+    if (batches.length) {
+      if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
+      candidates = await runRecallSweep({
+        pr,
+        details,
+        base,
+        batches,
+        cwd,
+        model: reviewModel,
+        title,
+        steer,
+        authorFamily: author?.family,
+        ignoreGlobs: reviewOpts.ignoreGlobs,
+        learnedRules: learnedRulesSection(pr.ghRepo),
+        cancelled: cancellationRequested,
+      });
+      audit({
+        msg: "review_recall_sweep",
+        pr_number: pr.number,
+        repo: pr.ghRepo || defaultRepo().ghRepo,
+        batches: batches.length,
+        candidates: candidates.length,
+      });
+      // A fanned-out review runs for minutes. Keep the placeholder honest about
+      // which half it is in — the "🔄 Reviewing `sha`…" prefix is what restart
+      // recovery matches on, so this only ever appends after it.
+      if (placeholderId)
+        await editIssueComment(
+          placeholderId,
+          `${REVIEW_MARKER}\n### 🤖 ${personaName()} review\n\n🔄 Reviewing${shortSha0 ? ` \`${shortSha0}\`` : ""}… · swept ${batches.length} batch${batches.length === 1 ? "" : "es"}, ${candidates.length} candidate${candidates.length === 1 ? "" : "s"} to adjudicate · [📺 open session](${sessionUrl(pr.number, "review", pr.ghRepo)})`,
+          pr.ghRepo,
+        ).catch(() => {});
+    }
+
+    // Stage 2 (or the only stage, when the PR did not warrant a fan-out): a
+    // fresh conversation that owns the output contract. It is never one of the
+    // stage-1 batches — a model scoring its own output in its own context is a
+    // near-random filter (Greptile), so the judge gets a clean context and its
+    // own tool access to check every claim.
+    const prompt = buildReviewPrompt(base, details, isUpdate, steer, pr.ghRepo, {
+      authorFamily: author?.family,
+      ignoreGlobs: reviewOpts.ignoreGlobs,
+      summaryOnly,
+      intent: prIntentSection(details),
+      discussion: prDiscussionSection(details, isGithubBotLogin, REVIEW_MARKER),
+      priorReview,
+      learnedRules: learnedRulesSection(pr.ghRepo),
+      lastReviewedSha:
+        isUpdate && state.lastReviewedSha && state.lastReviewedSha !== pr.headSha
+          ? state.lastReviewedSha
+          : undefined,
+      candidates: candidates.length ? candidatesBlock(candidates) : undefined,
+    });
 
     const persistReviewResult = (result: GithubRunResult) => {
       updatePrState(
@@ -483,7 +657,7 @@ export async function runReview(
     }
 
     if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
-    let parsed = parseReviewOutput(finalResult.text, cwd);
+    let parsed = withDedupedFindings(parseReviewOutput(finalResult.text, cwd));
     // A repair turn can only re-express what the first turn already produced.
     // When that turn emitted nothing at all, the repair resumes an engine
     // session with no inspection in it and the model says so, at length, in
@@ -524,7 +698,7 @@ export async function runReview(
       }
       persistReviewResult(finalResult);
       if (cancellationRequested()) return finishCancelled(placeholderId || undefined);
-      parsed = parseReviewOutput(finalResult.text, cwd);
+      parsed = withDedupedFindings(parseReviewOutput(finalResult.text, cwd));
     }
     const reviewError =
       finalResult.error ||
