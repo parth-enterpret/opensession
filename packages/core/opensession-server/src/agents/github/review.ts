@@ -40,6 +40,7 @@ import {
   planHypothesisBatches,
   planReviewBatches,
   planVerifications,
+  REVIEW_MODELS,
   VERIFY,
   type Hypothesis,
   type ReviewBatch,
@@ -252,7 +253,9 @@ async function planHypotheses(opts: {
     }),
     cwd: opts.cwd,
     mode: "ask",
-    model: opts.model,
+    // Each stage names its model and takes no fallback. See REVIEW_MODELS.
+    model: REVIEW_MODELS.plan,
+    noFallback: true,
     branch: pr.headRef,
     title: `${opts.title} · plan`.slice(0, 100),
     resume: false,
@@ -372,7 +375,8 @@ async function runRecallSweep(opts: {
         }),
         cwd: opts.cwd,
         mode: "ask",
-        model: opts.model,
+        model: REVIEW_MODELS.sweep,
+        noFallback: true,
         branch: pr.headRef,
         title: `${opts.title} · sweep ${batch.index}/${batches.length}`.slice(0, 100),
         // Each batch is its own context by construction; nothing to resume.
@@ -538,7 +542,11 @@ async function runVerifySweep(opts: {
         }),
         cwd: opts.cwd,
         mode: "ask",
-        model: opts.model,
+        // A different family from the finder, on a different account. See
+        // REVIEW_MODELS: this is both the rate-limit split and the only cheap
+        // test of whether stage 2 refutes anything at all.
+        model: REVIEW_MODELS.verify,
+        noFallback: true,
         branch: pr.headRef,
         title: `${opts.title} · verify ${item.index}/${verify.length}`.slice(0, 100),
         resume: false,

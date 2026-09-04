@@ -79,19 +79,65 @@ export interface ReviewBatch {
  *     17:33:27  sweep-11  claude-sonnet-5  $1.210
  *     17:38:02  sweep-11  gpt-5.6-sol      $1.063   <- same batch, again
  *
- * So call count is the budget, and these counts are how it is spent. Cutting
- * coverage from one file per batch to three, capping hypotheses at 6 and
- * verifiers at 12, takes a 10-file PR from 18 sweeps to about 10 and keeps the
- * whole review inside one account-hour. Concurrency drops to 4 for the same
- * reason: a wide fan-out does not spend fewer requests, it spends them in a
- * burst, and the cap is per hour.
+ * Three files per batch was tried and MEASURED AS WORSE. Batch size drives
+ * turns per batch, and turns are unbounded: at one file a sweep ran 14-45 calls
+ * for about $1, at three files it ran 76-94 calls for $7-9. Ten fat batches
+ * cost more than eighteen thin ones. So coverage stays at one file per batch,
+ * and the ceilings below bound the count instead.
  *
- * One file per batch was bought in the first place because coverage without
- * depth had been measured as worth nothing. That reasoning was sound when
- * hypothesis batches did not exist. They do now, they carry the cross-file
- * findings, and paying for one agent per file on top of them is buying the same
- * coverage twice.
+ * Concurrency stays at 4 because a wide fan-out does not spend fewer requests,
+ * it spends them in a burst, and the cap is per hour.
+ *
+ * The remaining lever is turns per agent, which nothing currently bounds. Stage
+ * 0 shows the shape of the fix that works: an absolute cap plus a prompt saying
+ * what not to do took the planner from 41 calls and $1.86 to one call and about
+ * 70 seconds. Sweeps need the same treatment.
  */
+/**
+ * Which model runs which stage, and why the review never falls back.
+ *
+ * The 2026-09-04 run spent $28.06 on a 10-file PR, and about half of that was
+ * the same batches billed twice. A Claude account is capped at 300 requests per
+ * hour, the review spent 547, and every call past the cap switched to
+ * `automaticFallbackModel()` and RE-RAN:
+ *
+ *     17:33:27  sweep-11  claude-sonnet-5  $1.210
+ *     17:38:02  sweep-11  gpt-5.6-sol      $1.063   <- the same batch, again
+ *
+ * Failover is right for an interactive session, where the alternative is a
+ * human stuck. It is wrong here. A sweep batch is one slice of a best-effort
+ * pass, and losing a slice costs far less than paying for every slice twice.
+ * So every stage below runs with `noFallback` and gets the model it names.
+ *
+ * The split across providers is deliberate, for two reasons:
+ *
+ * RATE. There is one Claude account and one Codex account, each with its own
+ * hourly cap. Putting every stage on one provider means one cap for the whole
+ * review, which is what 547 calls hit. Splitting the two heaviest stages across
+ * the two accounts roughly halves the requests either one sees.
+ *
+ * INDEPENDENCE. The verifier exists to refute the finder. In the measured run
+ * all 13 candidates survived and NOTHING was refuted, which is either a clean
+ * candidate list or a verifier agreeing with its own reasoning. Greptile
+ * measured a model reviewing its own family's output as materially worse
+ * (Claude recall 53.7% on Claude-authored code versus GPT's 62.0%), and a
+ * verifier drawn from a different family is less likely to rubber-stamp the
+ * finder. Whether that changes our refutation rate is untested and worth
+ * measuring — it is the cheapest available test of whether stage 2 works.
+ */
+export const REVIEW_MODELS = {
+  /**
+   * One call, no tools, names the questions. Cheap by construction, so this is
+   * about judgement rather than budget: the questions set what stage 1 hunts
+   * for, and a vague one wastes a whole agent.
+   */
+  plan: "claude-sonnet-5",
+  /** The reasoning work, and the bulk of the requests. Claude account. */
+  sweep: "claude-sonnet-5",
+  /** Narrow refutation, many short runs. Codex account — see INDEPENDENCE. */
+  verify: "gpt-5.6-sol",
+} as const;
+
 export const FANOUT = {
   /**
    * Below this many changed files, stay single-pass. A 2-file PR already gets
@@ -112,7 +158,7 @@ export const FANOUT = {
    * expensive. Take it: cost is the thing we can afford to spend here, and
    * coverage without depth has now been measured as worth nothing.
    */
-  filesPerBatch: 3,
+  filesPerBatch: 1,
   /** …unless the slice is already big. A 900-line file gets its batch alone. */
   linesPerBatch: 300,
   /**

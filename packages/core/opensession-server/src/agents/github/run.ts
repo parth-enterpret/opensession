@@ -269,6 +269,21 @@ export interface GithubRunOpts {
   cwd: string;
   mode: "ask" | "code";
   model?: string;
+  /**
+   * Set to disable provider failover for this run.
+   *
+   * By default a usage-limited run switches to `automaticFallbackModel()` and
+   * runs AGAIN on a different model. For an interactive session that is right.
+   * For a fanned-out review it is not: the review spends more requests than one
+   * account's hourly cap allows, so the failover fires on most batches and each
+   * one is billed twice. Measured at $28.06 for a 10-file PR, roughly half of
+   * it re-runs (software-factory docs/eval/run-2026-09-04-pr12272.md).
+   *
+   * A review stage that names its own model wants that model or nothing. A
+   * batch that fails is one slice of a best-effort sweep, and losing it costs
+   * far less than silently re-running it on a second provider.
+   */
+  noFallback?: boolean;
   branch: string;
   title: string;
   /** Resume the prior engine conversation for this PR+behavior if one exists. */
@@ -614,7 +629,7 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
           confirmTools: STRIPE_CONFIRM_TOOLS,
           aws: true,
           author: opts.author,
-          fallbackModel: automaticFallbackModel(effectiveModel),
+          fallbackModel: opts.noFallback ? undefined : automaticFallbackModel(effectiveModel),
           mcpServers: githubFlowMcpServers(),
           trustProfile: "automation",
           journalKind: `github-${opts.kind}`,
@@ -634,7 +649,7 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
         confirmTools: STRIPE_CONFIRM_TOOLS,
         aws: true,
         author: opts.author,
-        fallbackModel: automaticFallbackModel(effectiveModel),
+        fallbackModel: opts.noFallback ? undefined : automaticFallbackModel(effectiveModel),
         mcpServers: githubFlowMcpServers(),
         trustProfile: "automation",
         journalKind: `github-${opts.kind}`,
@@ -649,7 +664,7 @@ export async function runGithubAgent(opts: GithubRunOpts): Promise<GithubRunResu
         confirmTools: STRIPE_CONFIRM_TOOLS,
         aws: true,
         author: opts.author,
-        fallbackModel: automaticFallbackModel(effectiveModel),
+        fallbackModel: opts.noFallback ? undefined : automaticFallbackModel(effectiveModel),
         mcpServers: githubFlowMcpServers(),
         githubEnv,
         journal: { osSessionId: bksId, kind: `github-${opts.kind}` },
