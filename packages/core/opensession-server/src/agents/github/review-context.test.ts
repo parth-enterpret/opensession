@@ -7,6 +7,8 @@ import {
   prDiscussionSection,
   prIntentSection,
   priorReviewSection,
+  CONVENTIONS,
+  repoConventionsSection,
 } from "./review-context";
 
 const BOT = "tella-butler";
@@ -150,5 +152,41 @@ describe("openHumanThreadLines", () => {
     );
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("why sync here?");
+  });
+});
+
+describe("the repo's own conventions as review context", () => {
+  const only = (name: string, body: string) => (p: string) => (p === name ? body : null);
+
+  test("quotes a convention file and says a violation is a finding", () => {
+    const s = repoConventionsSection(only("AGENTS.md", "- always assert the whole output"));
+    expect(s).toContain("AGENTS.md");
+    expect(s).toContain("always assert the whole output");
+    expect(s).toContain("is a finding");
+  });
+
+  test("says nothing at all when the repo has no convention files", () => {
+    expect(repoConventionsSection(() => null)).toBe("");
+  });
+
+  test("ignores a file that exists but is blank", () => {
+    expect(repoConventionsSection(only("AGENTS.md", "   \n\n "))).toBe("");
+  });
+
+  test("truncates one oversized file instead of dropping it", () => {
+    const s = repoConventionsSection(only("AGENTS.md", "x".repeat(CONVENTIONS.perFileCap + 500)));
+    expect(s).toContain("(truncated)");
+    expect(s.length).toBeLessThan(CONVENTIONS.perFileCap + 2000);
+  });
+
+  test("stops once the total cap is reached rather than growing without bound", () => {
+    const big = "y".repeat(CONVENTIONS.perFileCap);
+    const s = repoConventionsSection((p) => (CONVENTIONS.files.includes(p as never) ? big : null));
+    expect(s.length).toBeLessThan(CONVENTIONS.totalCap + 2000);
+  });
+
+  test("keeps the injection carve-out, so a PR editing AGENTS.md cannot issue orders", () => {
+    const s = repoConventionsSection(only("AGENTS.md", "- rule"));
+    expect(s).toContain("injection rule");
   });
 });

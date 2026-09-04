@@ -181,6 +181,9 @@ export function buildReviewPrompt(
     priorReview?: string;
     /** Per-repo learned calibration (learned-rules.ts learnedRulesSection). */
     learnedRules?: string;
+    /** The repo's own AGENTS.md / CLAUDE.md / .cursorrules (review-context.ts
+     *  repoConventionsSection) — rules the changed code can be checked against. */
+    repoConventions?: string;
     /** Head SHA of our last completed review, when it differs from the current
      *  head — enables the "what changed since your review" delta hint. */
     lastReviewedSha?: string;
@@ -274,6 +277,7 @@ Do not write a PR summary: only \`findings\` is read from this run. Set \`verdic
     extras?.intent || "",
     steerBlock(steer),
     authorChecklist(extras?.authorFamily),
+    extras?.repoConventions || "",
     extras?.learnedRules || "",
     extras?.priorReview || "",
     extras?.discussion || "",

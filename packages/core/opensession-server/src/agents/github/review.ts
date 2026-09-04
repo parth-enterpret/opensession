@@ -30,6 +30,7 @@ import {
   sessionUrl,
   type GithubRunResult,
 } from "./run";
+import { readFileSync } from "fs";
 import {
   assembleReview,
   changedFilesFromPatch,
@@ -87,6 +88,7 @@ import {
 } from "./feedback";
 import {
   prIntentSection,
+  repoConventionsSection,
   prDiscussionSection,
   classifyPriorFindings,
   openHumanThreadLines,
@@ -192,6 +194,23 @@ const SEV_EMOJI: Record<string, string> = {
   p0: "🔴", p1: "🔴", p2: "🟠", p3: "⚪",
   high: "🔴", medium: "🟠", low: "⚪",
 };
+
+/**
+ * The repo's own convention files, read from the review checkout.
+ *
+ * Best-effort by construction: a repo with no AGENTS.md contributes "" and the
+ * prompt is unchanged. See repoConventionsSection for why these are inlined
+ * rather than left for the agent to go and find.
+ */
+function repoConventions(cwd: string): string {
+  return repoConventionsSection((name) => {
+    try {
+      return readFileSync(`${cwd}/${name}`, "utf-8");
+    } catch {
+      return null;
+    }
+  });
+}
 
 /**
  * Stage 0 of the fanned-out review: ask what to investigate.
@@ -341,6 +360,7 @@ async function runRecallSweep(opts: {
           ignoreGlobs: opts.ignoreGlobs,
           intent: prIntentSection(opts.details),
           learnedRules: opts.learnedRules,
+          repoConventions: repoConventions(opts.cwd),
           batch: {
             files: batch.files,
             index: batch.index,
@@ -934,6 +954,7 @@ export async function runReview(
       discussion: prDiscussionSection(details, isGithubBotLogin, REVIEW_MARKER),
       priorReview,
       learnedRules: learnedRulesSection(pr.ghRepo),
+      repoConventions: repoConventions(cwd),
       lastReviewedSha:
         isUpdate && state.lastReviewedSha && state.lastReviewedSha !== pr.headSha
           ? state.lastReviewedSha
