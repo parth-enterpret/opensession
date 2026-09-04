@@ -74,9 +74,19 @@ function prRef(pr: PrPayload, ghRepo?: string): PrRef | null {
 
 /** Resolve review config from the seeded automation (its enabled flag + prompt/model). */
 export function resolveReviewConfig(): { autoEnabled: boolean; config: ReviewConfig } {
-  const automation = listAutomations().find((a) => a.eventKey === PR_EVENT_KEY);
+  // `listAutomations()` returns disabled entries too, and a DISABLED automation
+  // must contribute nothing at all -- not its prompt, not its model. The
+  // previous version read `enabled` for `autoEnabled` but took the prompt and
+  // model unconditionally, so an automation switched off months ago went on
+  // silently overriding DEFAULT_REVIEW_PROMPT for every manually-triggered
+  // review. On the deployed host that was a frozen 5,955-character copy from
+  // 2026-08-28, which meant every edit to the prompt in this repo was dead on
+  // arrival and no amount of local testing could reproduce production.
+  const automation = listAutomations().find(
+    (a) => a.eventKey === PR_EVENT_KEY && a.enabled,
+  );
   return {
-    autoEnabled: !!automation?.enabled,
+    autoEnabled: !!automation,
     config: {
       prompt: automation?.prompt || DEFAULT_REVIEW_PROMPT,
       model: automation?.model,
