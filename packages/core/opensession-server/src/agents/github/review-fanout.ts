@@ -127,54 +127,68 @@ export interface ReviewBatch {
  */
 export const REVIEW_MODELS = {
   /**
-   * One or two turns, no tools, names the questions. Too small to matter for
-   * cost, so this is on the cheap Claude tier purely to keep the Claude account
-   * warm for the verifier below.
+   * EVERY REVIEW AGENT RUNS ON CODEX. Claude is for analysis and orchestration,
+   * not for the fleet.
+   *
+   * The rate limit forced this and the cost analysis agrees. A single review
+   * needs more requests than one Claude account's 300/hour cap allows, proved
+   * twice: the first run paid twice for every batch past the cap, and the
+   * second had ten sweeps killed outright. One PR review should not consume an
+   * account's whole quota, and on Claude it did.
+   *
+   * The cache economics point the same way, and the reason is worth writing
+   * down because it is not a knob we can turn. This harness sets no
+   * `cache_control` anywhere -- the Claude Code SDK owns caching, and the
+   * harness only reports what it did. `planSdkTurn` resumes the SDK session
+   * when history grows, which is right, but any move to a different account
+   * forces a FULL FLAT REPLAY, because SDK sessions live in per-account config
+   * directories. Near a usage limit, when rotation kicks in, that re-writes the
+   * entire cache every turn.
+   *
+   * On top of that Anthropic bills a cache write at 1.25x input while OpenAI
+   * bills writes at nothing. Measured on one PR: 85.3% of the Sonnet sweep bill
+   * was cache writes alone, and per turn Sonnet ran $0.054 against Sol's $0.042
+   * -- twice the per-token price and still cheaper.
    */
-  plan: "claude-haiku-4-5",
+
+  /** One or two turns, no tools. Too small to matter; cheapest tier. */
+  plan: "gpt-5.6-luna",
+
   /**
-   * The reasoning work, and about 90% of a review's turns. On the CODEX
-   * account, for three measured reasons.
+   * The reasoning work, ~90% of a review's turns.
    *
-   * RATE. The Claude account is capped at 300 requests an hour and a single
-   * review exceeds it. Two consecutive runs proved it: the first paid twice for
-   * every batch past the cap, and the second -- with failover removed -- had
-   * TEN sweeps killed outright. Sweeps are the turns, so sweeps are what has to
-   * move off the capped account. The Codex account logged no usage-limit error
-   * on either day.
+   * Terra is the middle tier ($2/$12 per M against Luna's $0.20/$1.20 and Sol's
+   * $4/$20) and this is the open experiment. Measured so far on the same PR and
+   * commit, against Codex's 12 findings:
    *
-   * CACHE WRITES. Anthropic bills a cache write at 1.25x input, and this
-   * workload writes ~18k cache tokens per turn: 85.3% of the Sonnet sweep bill
-   * was cache writes alone. OpenAI does not bill writes at all. Measured on the
-   * same PR, Sonnet cost $0.054 per turn and Sol $0.042 -- Sol is twice the
-   * per-token price and still cheaper, because the line this workload spends
-   * most on is the one it does not charge for.
+   *   claude-sonnet-5   9/12   $22.56   (and it exhausted the account)
+   *   gpt-5.6-luna      8/12   $3.88
+   *   gpt-5.6-terra        ?        ?
    *
-   * PRICE. Luna over Sol is the open experiment. Projecting the measured sweep
-   * tokens puts Sol at $9.65 and Luna at $0.50 for identical work. Sol is known
-   * to complete a sweep (its legs reached `stop` with findings where Sonnet's
-   * were still going at 57 turns); Luna is not yet known to. Recall is the
-   * thing worth protecting, so if Luna's recall drops against the 9-of-12
-   * baseline, move this back to Sol and keep the account split -- that alone
-   * fixes the rate limit and still beats Sonnet per turn.
+   * Luna already sits inside the $1-5 target band at one finding behind, so
+   * Terra has to justify its price in recall. If it does not beat Luna, keep
+   * Luna: both numbers are n=1 and a 9-versus-8 gap is inside plausible
+   * run-to-run variance, so the tie-break should go to the cheaper model until
+   * repeats say otherwise.
    */
-  sweep: "gpt-5.6-luna",
+  sweep: "gpt-5.6-terra",
+
   /**
-   * Narrow refutation, ~100 short turns. Back on the CLAUDE account, and
-   * deliberately a different family from the sweep model above.
+   * Narrow refutation, one claim each.
    *
-   * The independence argument is the whole reason stage 2 exists: it is there
-   * to refute the finder, and in the measured run it refuted nothing at all.
-   * Greptile measured a model reviewing its own family's output as materially
-   * worse (Claude recall 53.7% on Claude-authored code against GPT's 62.0%), so
-   * with the finder on Codex the verifier belongs on Claude.
+   * Now the same provider as the finder, which gives up the cross-family
+   * independence the earlier split bought. That is a real loss and it is taken
+   * deliberately: keeping the verifier on Claude puts ~200 turns back on the
+   * capped account, which is the problem this whole change exists to fix.
+   * A different MODEL within the family is the compromise available, and it is
+   * weaker.
    *
-   * Haiku rather than Sonnet because the task is narrow and the account has
-   * budget to spare: ~100 verifier turns sit well inside the 300/hour cap once
-   * the sweeps have moved off it. This also balances the two accounts instead
-   * of stacking one.
+   * Worth remembering what the verifier is currently achieving: in the run
+   * where it cost $3.63 it refuted nothing at all. A stage that changes no
+   * outcome does not deserve a rate-limit budget, and the honest next question
+   * is whether stage 2 works, not what it should cost.
    */
-  verify: "claude-haiku-4-5",
+  verify: "gpt-5.6-luna",
 } as const;
 
 export const FANOUT = {
