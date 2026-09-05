@@ -505,7 +505,9 @@ async function runVerifySweep(opts: {
   const totalLines = opts.details.additions + opts.details.deletions;
   const deadline =
     Date.now() + githubRunTimeoutMs(totalLines);
-  const turnMs = githubRunTimeoutMs(0);
+  // Absolute, not a share of the review budget. One verifier answers one
+  // yes-or-no question; see VERIFY.timeoutMs for the measurement behind it.
+  const turnMs = Math.min(VERIFY.timeoutMs, githubRunTimeoutMs(0));
   const queue = verify.map((finding, i) => ({ finding, index: i + 1 }));
   const out: VerifySweepResult = {
     survivors: [],

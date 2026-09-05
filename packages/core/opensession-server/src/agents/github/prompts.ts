@@ -341,6 +341,20 @@ ${candidate.body.trim().slice(0, 1500)}
 Your checkout is pinned to this PR's HEAD and both refs are fetched, read-only. Start with
 \`git diff --find-renames origin/${pr.baseRefName}...HEAD -- '${candidate.path}'\`, then Read that file whole and Grep whatever the claim depends on — the callers, the guard it says is missing, the type it says is nullable. Do not edit anything, do not run interactive tools, and do not post anything yourself.
 
+## What this costs
+
+One claim, one file, and the handful of places it depends on. Measured on a real
+review, verifiers spent about 19 turns each on this — more turns in total than
+the sweeps that raised every candidate in the first place, and 90% of the whole
+review's bill.
+
+So work like it is one question, because it is. Read the diff for the file, read
+the file, and grep the specific thing the claim rests on. If about a dozen tool
+calls have not either refuted it or confirmed it, they are not going to: say what
+you could not trace and KEEP it. An honest "I could not rule this out, here is
+where I stopped" is a correct answer and costs the reader nothing — a human makes
+the final call. Grinding on is what costs.
+
 ## How to decide
 
 DROP it only when you can name the concrete reason the claim is wrong, and cite the file and lines you read for that reason:

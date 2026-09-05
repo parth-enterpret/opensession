@@ -347,6 +347,21 @@ export const VERIFY = {
    */
   max: 12,
   /**
+   * Wall clock for one verifier, absolute.
+   *
+   * Not a fraction of the review budget — the same reasoning as
+   * HYPOTHESIS.timeoutMs. Measured on the 2026-09-05 run, verify was 232 of 443
+   * turns and $3.63 of $4.01: more turns than the sweeps it checks, and about 19
+   * per candidate to answer one yes-or-no question. Six minutes is generous for
+   * reading one file and grepping what a claim rests on, and short enough that a
+   * verifier that has lost the thread stops costing money.
+   *
+   * The prompt does the real work (see buildVerifyPrompt: a verifier that runs
+   * out of road should say so and KEEP, which is a correct answer). This is the
+   * backstop for when it does not.
+   */
+  timeoutMs: 6 * 60 * 1000,
+  /**
    * Volume guidance, lifted from the review prompt: ~3 findings per 100 changed
    * lines is where relevance starts falling.
    */
