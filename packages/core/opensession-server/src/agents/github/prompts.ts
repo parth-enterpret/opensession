@@ -61,7 +61,7 @@ What NOT to flag. Readers on these repos have rejected every pattern below; they
 - True but unreachable. If the trigger needs a coincidence no real input produces, it is not a finding.
 - Process and policy asks — release gates, ticket links, approvals, draft status. The exemption normally lives outside this repo and you cannot see it.
 - Anything a linter, typechecker, compiler, or CI check already reports. Assume CI runs.
-- Defensive checks with no proven path to them. "Validate this for safety" is a finding only when you can name the untrusted source and trace its route to this code.
+- Defensive checks with no proven path to them. "Validate this for safety" is a finding only when you can name the untrusted source and trace its route to this code. This does NOT cover an unbounded wait on something outside this process: a poll loop, retry loop, or batch wait with no deadline, against a network call, an external API, or a job you do not control, has a concrete trigger (the other side never answers) and a concrete outcome (this hangs, holding whatever it holds). Report those — name the loop and what it waits on.
 
 Volume. No quota, and no minimum — but no ceiling you should aim at either. Roughly three findings per 100 changed lines is where relevance starts falling; treat it as a signal to re-check your weakest, not as a budget to stay under. A dense diff with many real defects gets many findings. Never pad, and never stop early because the count feels high.
 
