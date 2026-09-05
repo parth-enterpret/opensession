@@ -157,21 +157,28 @@ export const REVIEW_MODELS = {
   /**
    * The reasoning work, ~90% of a review's turns.
    *
-   * Terra is the middle tier ($2/$12 per M against Luna's $0.20/$1.20 and Sol's
-   * $4/$20) and this is the open experiment. Measured so far on the same PR and
-   * commit, against Codex's 12 findings:
+   * Terra was tried here and lost on BOTH axes. Same PR, same commit, scored
+   * against the same 12 incumbent findings:
    *
    *   claude-sonnet-5   9/12   $22.56   (and it exhausted the account)
    *   gpt-5.6-luna      8/12   $3.88
-   *   gpt-5.6-terra        ?        ?
+   *   gpt-5.6-terra     6/12   $2.88
    *
-   * Luna already sits inside the $1-5 target band at one finding behind, so
-   * Terra has to justify its price in recall. If it does not beat Luna, keep
-   * Luna: both numbers are n=1 and a 9-versus-8 gap is inside plausible
-   * run-to-run variance, so the tie-break should go to the cheaper model until
-   * repeats say otherwise.
+   * The gap is in the sweeps themselves, not in what the verifier dropped
+   * afterwards: Terra raised 11 candidates across 14 passes where Luna raised
+   * 19 across 16. Terra also costs $0.0157 a turn against Luna's $0.0014, so it
+   * is eleven times the price for two thirds of the candidates.
+   *
+   * That is a real result and it is worth stating plainly, because the
+   * intuition it breaks is a strong one: the mid-tier model was not a
+   * compromise between the expensive one and the cheap one. On this workload it
+   * was worse than both per dollar and worse than Luna outright.
+   *
+   * Still n=1 per model. Luna is the standing choice because it has the best
+   * measured recall of the two Codex tiers AND the lowest price, so nothing is
+   * being traded away by preferring it.
    */
-  sweep: "gpt-5.6-terra",
+  sweep: "gpt-5.6-luna",
 
   /**
    * Narrow refutation, one claim each.
