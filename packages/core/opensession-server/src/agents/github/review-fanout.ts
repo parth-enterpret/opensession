@@ -134,8 +134,29 @@ export const REVIEW_MODELS = {
   plan: "claude-sonnet-5",
   /** The reasoning work, and the bulk of the requests. Claude account. */
   sweep: "claude-sonnet-5",
-  /** Narrow refutation, many short runs. Codex account — see INDEPENDENCE. */
-  verify: "gpt-5.6-sol",
+  /**
+   * Narrow refutation, many short runs. Codex account — see INDEPENDENCE.
+   *
+   * Luna, not Sol. Sol is the most expensive model available ($4/$20 per M
+   * against Luna's $0.20/$1.20), and projecting the 21:26 run's actual verify
+   * tokens onto both prices puts the same work at $3.96 on Sol and $0.20 on
+   * Luna. Both are the same provider family, so the independence argument that
+   * chose a non-Claude verifier is unaffected.
+   *
+   * A verifier is also the right place to spend least. It answers one narrow
+   * question — can this specific claim be refuted against the code — which is
+   * the shape every incumbent hands to a cheap model: Greptile runs its
+   * post-review gate, dedup and severity reclassifier on a nano model, and
+   * CodeRabbit triages on a cheap model before the frontier one.
+   *
+   * There is a measurement behind the risk, too. In the 2026-09-04 run all 13
+   * candidates survived and the verifier refuted nothing. An expensive stage
+   * that changes no outcome is not earning its price, so the downside of a
+   * cheaper one is small and the upside is 20x. If Luna refutes MORE, the
+   * stage was underperforming rather than clean; if it refutes the same
+   * nothing, we learn stage 2 needs rethinking rather than re-pricing.
+   */
+  verify: "gpt-5.6-luna",
 } as const;
 
 export const FANOUT = {
