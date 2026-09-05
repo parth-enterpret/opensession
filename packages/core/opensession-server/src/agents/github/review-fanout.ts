@@ -127,36 +127,54 @@ export interface ReviewBatch {
  */
 export const REVIEW_MODELS = {
   /**
-   * One call, no tools, names the questions. Cheap by construction, so this is
-   * about judgement rather than budget: the questions set what stage 1 hunts
-   * for, and a vague one wastes a whole agent.
+   * One or two turns, no tools, names the questions. Too small to matter for
+   * cost, so this is on the cheap Claude tier purely to keep the Claude account
+   * warm for the verifier below.
    */
-  plan: "claude-sonnet-5",
-  /** The reasoning work, and the bulk of the requests. Claude account. */
-  sweep: "claude-sonnet-5",
+  plan: "claude-haiku-4-5",
   /**
-   * Narrow refutation, many short runs. Codex account — see INDEPENDENCE.
+   * The reasoning work, and about 90% of a review's turns. On the CODEX
+   * account, for three measured reasons.
    *
-   * Luna, not Sol. Sol is the most expensive model available ($4/$20 per M
-   * against Luna's $0.20/$1.20), and projecting the 21:26 run's actual verify
-   * tokens onto both prices puts the same work at $3.96 on Sol and $0.20 on
-   * Luna. Both are the same provider family, so the independence argument that
-   * chose a non-Claude verifier is unaffected.
+   * RATE. The Claude account is capped at 300 requests an hour and a single
+   * review exceeds it. Two consecutive runs proved it: the first paid twice for
+   * every batch past the cap, and the second -- with failover removed -- had
+   * TEN sweeps killed outright. Sweeps are the turns, so sweeps are what has to
+   * move off the capped account. The Codex account logged no usage-limit error
+   * on either day.
    *
-   * A verifier is also the right place to spend least. It answers one narrow
-   * question — can this specific claim be refuted against the code — which is
-   * the shape every incumbent hands to a cheap model: Greptile runs its
-   * post-review gate, dedup and severity reclassifier on a nano model, and
-   * CodeRabbit triages on a cheap model before the frontier one.
+   * CACHE WRITES. Anthropic bills a cache write at 1.25x input, and this
+   * workload writes ~18k cache tokens per turn: 85.3% of the Sonnet sweep bill
+   * was cache writes alone. OpenAI does not bill writes at all. Measured on the
+   * same PR, Sonnet cost $0.054 per turn and Sol $0.042 -- Sol is twice the
+   * per-token price and still cheaper, because the line this workload spends
+   * most on is the one it does not charge for.
    *
-   * There is a measurement behind the risk, too. In the 2026-09-04 run all 13
-   * candidates survived and the verifier refuted nothing. An expensive stage
-   * that changes no outcome is not earning its price, so the downside of a
-   * cheaper one is small and the upside is 20x. If Luna refutes MORE, the
-   * stage was underperforming rather than clean; if it refutes the same
-   * nothing, we learn stage 2 needs rethinking rather than re-pricing.
+   * PRICE. Luna over Sol is the open experiment. Projecting the measured sweep
+   * tokens puts Sol at $9.65 and Luna at $0.50 for identical work. Sol is known
+   * to complete a sweep (its legs reached `stop` with findings where Sonnet's
+   * were still going at 57 turns); Luna is not yet known to. Recall is the
+   * thing worth protecting, so if Luna's recall drops against the 9-of-12
+   * baseline, move this back to Sol and keep the account split -- that alone
+   * fixes the rate limit and still beats Sonnet per turn.
    */
-  verify: "gpt-5.6-luna",
+  sweep: "gpt-5.6-luna",
+  /**
+   * Narrow refutation, ~100 short turns. Back on the CLAUDE account, and
+   * deliberately a different family from the sweep model above.
+   *
+   * The independence argument is the whole reason stage 2 exists: it is there
+   * to refute the finder, and in the measured run it refuted nothing at all.
+   * Greptile measured a model reviewing its own family's output as materially
+   * worse (Claude recall 53.7% on Claude-authored code against GPT's 62.0%), so
+   * with the finder on Codex the verifier belongs on Claude.
+   *
+   * Haiku rather than Sonnet because the task is narrow and the account has
+   * budget to spare: ~100 verifier turns sit well inside the 300/hour cap once
+   * the sweeps have moved off it. This also balances the two accounts instead
+   * of stacking one.
+   */
+  verify: "claude-haiku-4-5",
 } as const;
 
 export const FANOUT = {
