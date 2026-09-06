@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { parseVerifyOutput } from "./review";
-import type { Finding } from "./review-fanout";
+import type { Finding } from "./review";
 
 const candidate: Finding = {
   path: "src/a.ts",

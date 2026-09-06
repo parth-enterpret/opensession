@@ -198,13 +198,26 @@ describe("rewritten review prompt sections", () => {
 
   test("carries the What NOT to flag block built from our own rejected findings", () => {
     expect(DEFAULT_REVIEW_PROMPT).toContain("What NOT to flag");
-    // Template coverage asks stay banned. The "assert the COMPLETE value" ask
-    // does NOT: it is 16 of 32 findings the corpus labels noise, but authors
-    // acted on 15 of those 16, and the harvested repo convention records 10
-    // raises with 9 acted upon. Banning it made acceptance criteria 3.1 (>=70%
-    // recall against acted-upon findings) unsatisfiable against 3.8.
+    // Both halves of the test-assertion ask are banned, and the second half was
+    // an exception here until it was re-measured.
+    //
+    // The old reasoning kept it because authors acted on 15 of 16, and read
+    // that as agreement. It is not. Those same findings are 94% MARKED NOISE,
+    // and the "assert the complete X" subclass is 12 for 12 — an author widens
+    // an assertion because it is cheaper than arguing. Act rate without the
+    // noise column ranks the least valuable finding shape first, which is
+    // exactly what happened.
+    //
+    // The criteria conflict named in the old comment was the same error one
+    // level up: 3.1 measured recall against acted-upon findings, so a shape
+    // that is complied with but never valued looked mandatory.
+    //
+    // Confirmed independently by a code-reading audit of our own output: 6 of
+    // 10 findings labelled trivial were this nit, several on lines the commit
+    // never touched. Largest single noise category we produce.
     expect(DEFAULT_REVIEW_PROMPT).toContain('"Add a case for X"');
-    expect(DEFAULT_REVIEW_PROMPT).toContain("assert the COMPLETE value");
+    expect(DEFAULT_REVIEW_PROMPT).toContain("ANY comment about a test assertion");
+    expect(DEFAULT_REVIEW_PROMPT).toContain("Do not raise it.");
     expect(DEFAULT_REVIEW_PROMPT).toContain("Make this configurable");
     expect(DEFAULT_REVIEW_PROMPT).toContain("Process and policy asks");
   });
