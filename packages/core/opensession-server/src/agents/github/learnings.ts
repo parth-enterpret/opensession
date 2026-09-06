@@ -42,6 +42,7 @@ import { readFeedback } from "./feedback";
 import { isNegativeSignal, isPositiveSignal, type FeedbackRecord } from "./feedback-gates";
 import {
   decideStatus, gateReplay, runStaticGates, selectForPrompt,
+  MAX_TEXT, MIN_DISTINCT_PRS, MIN_SIGNALS,
   type GateResult, type Learning, type LearningEffect, type LearningProvenance,
 } from "./learnings-gates";
 
@@ -174,6 +175,18 @@ ${live.length ? live.map((l) => `- [${l.status}] (${l.kind}) ${l.text}`).join("\
 Write each learning as one or two imperative sentences that name something
 concrete: a symbol, a path, a condition, a bug class. A learning that names
 nothing applies to everything, which is the same as applying to nothing.
+
+The gates below run on your output automatically and reject it without asking
+you again, so treat them as the contract rather than as advice:
+
+- HARD LIMIT ${MAX_TEXT} CHARACTERS per learning. The first run of this prompt had
+  two of three candidates rejected at 418 and 372 characters. If you cannot say
+  it in ${MAX_TEXT}, you are describing an incident rather than a rule.
+- At least ${MIN_SIGNALS} supporting signals, from at least ${MIN_DISTINCT_PRS} different pull
+  requests.
+- No hedging. "consider", "maybe", "generally", "be careful", "as needed" and a
+  trailing question mark are each an automatic rejection, because a disposition
+  cannot be followed and cannot be measured.
 
 - "calibration" narrows a pattern readers reject. It must be scoped so it could
   never suppress a genuine P1.
