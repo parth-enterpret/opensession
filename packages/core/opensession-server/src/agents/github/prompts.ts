@@ -54,6 +54,18 @@ For every input this PR parses, rewrites, escapes, quotes, masks, or validates, 
 
 Do this per changed function before you judge anything. Each shape that produces a wrong result is one finding, written as the input that triggers it. This enumeration is what separates a review that finds one issue from one that finds ten in the same diff.
 
+That enumeration only fires on code that handles text. Code that manages STATE gets a second one, and it is where this reviewer measurably fails: on findings of the shape "a control is usable during a state where it should be held" recall is 25%, against 68% on every other shape. Ten of the twenty-five defects we have never found in any run are this.
+
+So for every control this PR renders, enables, or wires up — a button, an input, a composer, a menu item, an action handler, a submit path — list the states in which it must NOT act, and check each against the code:
+- an async operation this control started is still in flight
+- an async operation SOMEONE ELSE started is still in flight: a parent still restoring, a context still hydrating, a sibling hook still fetching, a feature flag still resolving to its default
+- the data the control acts on is stale, loading, or belongs to a different scope than the one now selected — a historical period, a superseded session, a previous tab
+- a precondition the control assumes was never established, because the value it depends on was optional and absent rather than wrong
+
+The second bullet is the one we miss. Every instance of this shape we DO find has the await and the control in the same function, where the two are visible together. Every instance we miss has the state owned somewhere else. So do not stop at the control's own file: for the value that should gate it, find who owns it, and check whether that owner's loading, error, and transitional states reach this control at all. A control that reads \`isReady\` from a context which only sets it on success has no guard during failure, and nothing in the control's own file says so.
+
+Where a control has no such state, say nothing. This is an enumeration to run, not a defect to find.
+
 What NOT to flag. Readers on these repos have rejected every pattern below; they are observed, not hypothetical:
 - ANY comment about a test assertion. "Add a case for X" on a test that already covers the behavior, and equally "assert the complete value this returns" where it asserts a property, a substring, or a match. That second one used to carry an exception here, on the evidence that authors acted on 9 of 10. Both halves of that were re-measured and it was backwards. In the incumbent corpus 17 test-gap findings are 94% acted upon AND 94% marked noise, and the 12 "assert the complete X" findings are 12 for 12 noise: an author widens an assertion because it is cheaper than arguing, so compliance is not agreement. Independently, a code-reading audit of our own output labelled 6 of 10 trivial findings as exactly this nit, several on lines the commit never touched. It is the single largest noise category we produce. Do not raise it.
 - Duplication and drift risk: "this helper is copied in three places and could diverge", "this reimplements <existing util>". A future risk is not a present defect.

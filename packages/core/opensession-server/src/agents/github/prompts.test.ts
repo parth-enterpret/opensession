@@ -252,3 +252,27 @@ describe("rewritten review prompt sections", () => {
     expect(prompt).toContain("return findings ONLY for P1 issues");
   });
 });
+
+describe("state-guard enumeration", () => {
+  test("the review prompt asks which states must hold a control", () => {
+    // Measured gap: recall on "a control is usable during a state where it
+    // should be held" was 3 of 12, against 23 of 34 on every other shape, and
+    // 10 of the 25 defects never found in any run have this shape.
+    expect(DEFAULT_REVIEW_PROMPT).toContain("list the states in which it must NOT act");
+  });
+
+  test("it names the case we actually miss: state owned elsewhere", () => {
+    // Every instance of this shape we found had the await and the control in
+    // one function. Every instance we missed had a parent, a context, a sibling
+    // hook or an unresolved flag owning the state, so the traversal is the
+    // point, not the category.
+    expect(DEFAULT_REVIEW_PROMPT).toContain("an async operation SOMEONE ELSE started");
+    expect(DEFAULT_REVIEW_PROMPT).toContain("find who owns it");
+  });
+
+  test("it does not turn the enumeration into a quota", () => {
+    // An enumeration that must produce a finding produces noise. This one is
+    // allowed to come back empty, like the parsing enumeration above it.
+    expect(DEFAULT_REVIEW_PROMPT).toContain("Where a control has no such state, say nothing");
+  });
+});
