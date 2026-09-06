@@ -411,6 +411,15 @@ export interface VerifyVerdict {
   reason: string;
   /** The candidate, with any correction the verifier made applied. */
   finding: Finding;
+  /**
+   * Other defects the verifier read at this site. Capped at two, held to the
+   * same bar as the candidate — see the sibling section of buildVerifyPrompt.
+   *
+   * Reported even when the candidate is dropped: refuting a claim and noticing a
+   * real defect beside it are independent outcomes, and the second is the one
+   * the evaluation says we keep losing.
+   */
+  siblings: Finding[];
 }
 
 /**
@@ -436,22 +445,58 @@ export function parseVerifyOutput(text: string, candidate: Finding): VerifyVerdi
     }
   }
   if (!o || typeof o !== "object")
-    return { keep: true, reason: "no usable verdict from the verifier", finding: candidate };
+    return {
+      keep: true,
+      reason: "no usable verdict from the verifier",
+      finding: candidate,
+      siblings: [],
+    };
 
   const reason =
     typeof o.reason === "string" && o.reason.trim() ? o.reason.trim().slice(0, 300) : "";
+  const str0 = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v.trim() : undefined;
+  // A sibling needs its own anchor and its own claim. Without both it cannot be
+  // posted (filterToDiff drops an unanchored finding silently), so drop it here
+  // where the reason is visible rather than downstream where it is not.
+  const siblings: Finding[] = (Array.isArray(o.siblings) ? o.siblings : [])
+    .slice(0, 2)
+    .map((sv: any): Finding | null => {
+      const path = str0(sv?.path) ?? candidate.path;
+      const line = Number.isInteger(sv?.line) && sv.line > 0 ? sv.line : 0;
+      const title = str0(sv?.title);
+      const body = str0(sv?.body);
+      if (!line || !title || !body) return null;
+      return {
+        path,
+        line,
+        severity: str0(sv?.severity) ?? "P2",
+        title,
+        body,
+        suggestion: str0(sv?.suggestion),
+      } as Finding;
+    })
+    .filter((f: Finding | null): f is Finding => !!f)
+    // Same line as the candidate and it is a restatement, not a sibling.
+    .filter((f: Finding) => !(f.path === candidate.path && f.line === candidate.line));
+
   if (String(o.verdict ?? "").trim().toLowerCase() === "drop")
-    return { keep: false, reason: reason || "refuted without a stated reason", finding: candidate };
+    return {
+      keep: false,
+      reason: reason || "refuted without a stated reason",
+      finding: candidate,
+      siblings,
+    };
 
   // Kept. Corrections are the verifier's other job: it has the file open, so its
   // anchor beats the sweep's. This matters more than it looks — filterToDiff()
   // silently discards any finding whose path:line is not in the diff, so a wrong
   // line is a lost finding, not a cosmetic problem.
-  const str = (v: unknown): string | undefined =>
-    typeof v === "string" && v.trim() ? v.trim() : undefined;
+  const str = str0;
   return {
     keep: true,
     reason: reason || "not refuted",
+    siblings,
     finding: {
       ...candidate,
       path: str(o.path) ?? candidate.path,
@@ -470,6 +515,8 @@ export interface VerifySweepResult {
   refuted: Array<{ path: string; line: number; title?: string; reason: string }>;
   /** Verifier runs that errored or timed out. Their candidates still survived. */
   errors: number;
+  /** Findings a verifier read at a candidate's site that were not the candidate. */
+  siblings: number;
   /** Candidates that never got a verifier (ceiling, deadline, shutdown). Survived. */
   unverified: number;
 }
@@ -513,6 +560,7 @@ async function runVerifySweep(opts: {
     survivors: [],
     refuted: [],
     errors: 0,
+    siblings: 0,
     unverified: unverified.length,
   };
   out.survivors.push(...unverified);
@@ -563,7 +611,14 @@ async function runVerifySweep(opts: {
       }
       const verdict = parseVerifyOutput(result.text, item.finding);
       if (verdict.keep) out.survivors.push(verdict.finding);
-      else
+      // Siblings survive independently of the candidate's verdict. They go
+      // through dedupeFindings with everything else, so a sibling two verifiers
+      // both noticed collapses to one.
+      if (verdict.siblings.length) {
+        out.siblings += verdict.siblings.length;
+        out.survivors.push(...verdict.siblings);
+      }
+      if (!verdict.keep)
         out.refuted.push({
           path: item.finding.path,
           line: item.finding.line,
@@ -579,7 +634,7 @@ async function runVerifySweep(opts: {
   console.log(
     `[github] review verify on PR #${pr.number}: ${opts.candidates.length} candidates in ${Math.round(
       (Date.now() - startedAt) / 1000,
-    )}s → ${out.survivors.length} survived, ${out.refuted.length} refuted, ${out.errors} errored, ${out.unverified} unverified`,
+    )}s → ${out.survivors.length} survived (${out.siblings} sibling), ${out.refuted.length} refuted, ${out.errors} errored, ${out.unverified} unverified`,
   );
   return out;
 }
@@ -808,7 +863,7 @@ export async function runReview(
     // name their own model; this path is the one that does not fan out, and
     // seeding it from the server default sent every small pull request to
     // Claude Sonnet at 52x the per-turn cost. See REVIEW_MODELS.single.
-    let reviewModel = REVIEW_MODELS.single;
+    let reviewModel: string = REVIEW_MODELS.single;
     const inversion = inverseReviewModel(pr, reviewModel);
     if (inversion) {
       reviewModel = inversion.model;
