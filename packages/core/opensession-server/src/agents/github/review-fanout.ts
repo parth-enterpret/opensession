@@ -315,11 +315,19 @@ export const FANOUT = {
    * ~85% of a review's wall clock purely because 34 batches were queued behind 4
    * slots.
    *
-   * Still at the 8 the workflow runner treats as safe for read-only agents. The
-   * old value assumed reviews run concurrently across PRs and shared the budget;
-   * when one review has the box to itself that assumption costs an hour a run.
+   * Then raised again to 16. The 8 came from what the workflow runner treats as
+   * safe for read-only agents, which is a shared-box assumption: it budgets for
+   * several reviews running at once across different PRs. A review that has the
+   * box to itself is not in that regime, and the sweep was still ~85% of wall
+   * clock at 8.
+   *
+   * The batches are independent read-only agents against separate files, so the
+   * only real ceiling is provider throughput. Watch for it rather than assume
+   * it: batch failures in the sweep log, or `N/M batches` coming back with N
+   * below M, mean this is too high and the extra parallelism is costing
+   * candidates rather than saving time.
    */
-  concurrency: 8,
+  concurrency: 16,
 };
 
 /**
@@ -454,12 +462,17 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
  */
 export const VERIFY = {
   /**
-   * Verifier runs in flight. Above stage 1's 4: a verifier reads one file and
-   * greps its callers where a batch reads three files whole, so the turns are
-   * shorter and the wave finishes sooner. Still under the 8 parallel read-only
-   * agents the workflow runner treats as safe, which reviews share across PRs.
+   * Verifier runs in flight. A verifier reads one file and greps its callers
+   * where a batch reads several whole, so its turns are shorter and the wave
+   * finishes sooner.
+   *
+   * Raised with FANOUT.concurrency for the same reason: the 4 and the 8 both
+   * came from a shared-box budget that assumed several reviews running at once
+   * across different PRs, and a review with the box to itself is not in that
+   * regime. Verify is ~150s of a review against the sweep's ~600, so this
+   * matters less, but it is the same mistake to leave in place.
    */
-  concurrency: 4,
+  concurrency: 8,
   /**
    * Hard ceiling on verifier runs per review. Candidates arrive severity-sorted
    * out of `dedupeFindings`, so anything past the ceiling is the least severe of
