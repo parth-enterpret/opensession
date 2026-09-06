@@ -42,6 +42,7 @@ import {
   planVerifications,
   applyDedupeGroups,
   DEDUPE,
+  sweepCameBackThin,
   expandPasses,
   REVIEW_MODELS,
   VERIFY,
@@ -415,10 +416,38 @@ async function runRecallSweep(opts: {
   await Promise.all(
     Array.from({ length: Math.min(FANOUT.concurrency, batches.length) }, worker),
   );
-  const candidates = dedupeFindings(found);
+  let candidates = dedupeFindings(found);
   console.log(
     `[github] review sweep on PR #${pr.number}: ${ran}/${queue0} batches (${FANOUT.passes}x${batches.length}) in ${Math.round((Date.now() - startedAt) / 1000)}s → ${found.length} candidates, ${candidates.length} after dedup`,
   );
+
+  // A draw that barely happened gets one more. See sweepCameBackThin: the
+  // generator's yield varies ninefold on identical configuration and the cases
+  // that scored zero came from its low end, so this raises the floor rather
+  // than the ceiling. Skipped when the deadline is gone — a resample that
+  // cannot finish is worse than a thin review, because it returns nothing.
+  const deadlineLeft = deadline - Date.now();
+  if (
+    sweepCameBackThin(candidates.length, batches.length) &&
+    !opts.cancelled() &&
+    !isShuttingDown() &&
+    deadlineLeft > githubRunTimeoutMs(0)
+  ) {
+    console.log(
+      `[github] review sweep on PR #${pr.number}: ${candidates.length} candidates over ${batches.length} batches is thin — resampling once`,
+    );
+    for (let attempt = 0; attempt < FANOUT.resampleAttempts; attempt++) {
+      queue.push(...expandPasses(batches, 1).map((b) => ({ ...b, pass: FANOUT.passes + attempt })));
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(FANOUT.concurrency, queue.length) }, worker),
+    );
+    const after = dedupeFindings(found);
+    console.log(
+      `[github] review sweep resample on PR #${pr.number}: ${candidates.length} → ${after.length} candidates`,
+    );
+    candidates = after;
+  }
   return candidates;
 }
 

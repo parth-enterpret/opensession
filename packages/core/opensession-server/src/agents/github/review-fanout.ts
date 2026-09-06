@@ -328,6 +328,29 @@ export const FANOUT = {
    * candidates rather than saving time.
    */
   concurrency: 16,
+  /**
+   * A sweep yielding fewer than `max(resampleFloor, batches * resamplePerBatch)`
+   * candidates gets one more attempt. See sweepCameBackThin: the generator's
+   * yield varies ninefold on identical configuration, and the zero-scoring cases
+   * came from its low end.
+   *
+   * One retry, not a loop. The point is to reject a draw that barely happened,
+   * not to keep drawing until the review looks busy — which would be a quota,
+   * and quotas produce noise.
+   */
+  resampleFloor: 10,
+  /**
+   * Sorted, the observed yields are 8 13 13 22 22 24 24 26 29 30 32 32 37 39 39
+   * 52 75 — median 29, bottom quartile around 22. At 0.9 a sixteen-batch sweep
+   * resamples below 14.4, which fires on 8, 13 and 13 and nothing else: the
+   * bottom fifth, not the bottom third.
+   *
+   * Deliberately conservative. Every resample is a second sweep, and a
+   * threshold near the median would turn this into a quota that pushes each
+   * review toward looking busy. It exists for the draw that barely happened.
+   */
+  resamplePerBatch: 0.9,
+  resampleAttempts: 1,
 };
 
 /**
@@ -525,6 +548,33 @@ export const DEDUPE = {
   /** One pass over a list of short strings. Generous; it should take seconds. */
   timeoutMs: 3 * 60 * 1000,
 };
+
+/**
+ * Did the sweep come back thin enough to be worth running again?
+ *
+ * Candidate counts across seventeen reviews of one configuration:
+ *
+ *     8  39  39  32  37  52  29  75  24  32  30  22  13  26  22  24  13
+ *
+ * Same prompt, same two passes, same batching. Ninefold spread. The low end
+ * ships a three-finding review and the high end a fifty-one-finding one, and the
+ * cases that scored zero were drawn from the low end — one scored 0 of 2 on
+ * thirteen candidates while the same configuration scored 4 of 4 on thirty-nine.
+ *
+ * So the floor is set by bad draws, not by what the generator manages on a good
+ * day, and raising the floor is a different intervention from telling it what to
+ * look for. Every prompt change is aimed at the ceiling; this is aimed at the
+ * floor.
+ *
+ * Scaled by batch count rather than absolute, because a two-file diff producing
+ * four candidates is not thin. The threshold is deliberately low: this exists to
+ * catch a generator that barely ran, not to push every review toward the median,
+ * and a resample costs a sweep.
+ */
+export function sweepCameBackThin(candidates: number, batches: number): boolean {
+  if (batches < FANOUT.minFiles) return false;
+  return candidates < Math.max(FANOUT.resampleFloor, batches * FANOUT.resamplePerBatch);
+}
 
 /**
  * Apply a dedupe verdict to a finding list.
