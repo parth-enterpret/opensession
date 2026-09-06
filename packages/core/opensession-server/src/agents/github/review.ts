@@ -40,6 +40,7 @@ import {
   planHypothesisBatches,
   planReviewBatches,
   planVerifications,
+  expandPasses,
   REVIEW_MODELS,
   VERIFY,
   type Hypothesis,
@@ -340,7 +341,20 @@ async function runRecallSweep(opts: {
   const totalLines = opts.details.additions + opts.details.deletions;
   const deadline =
     Date.now() + githubRunTimeoutMs(totalLines);
-  const queue = [...batches];
+  // Every batch runs FANOUT.passes times. Two independent passes over one
+  // commit were measured finding DISJOINT halves of the answer — pass one
+  // matched two of four confirmed defects, pass two matched a third, and the
+  // overlap was empty. Mean single pass 1.5 of 4, union of two 3 of 4.
+  //
+  // That is the whole reason this exists. The misses are not a blind spot the
+  // prompt can close: three of the four defects are reachable as configured and
+  // which ones surface is close to a coin flip. The two commercial reviewers in
+  // the corpus behave the same way — on 41 shared commits they agree on at most
+  // a fifth of what they confirm — so this is a property of the task.
+  //
+  // Passes multiply noise as well as coverage, which is why they arrived
+  // together with the precision work rather than before it.
+  const queue = expandPasses(batches, FANOUT.passes);
   const found: Finding[] = [];
   let ran = 0;
   const startedAt = Date.now();
@@ -359,7 +373,7 @@ async function runRecallSweep(opts: {
         prNumber: pr.number,
         ghRepo: pr.ghRepo,
         kind: "review",
-        sessionSuffix: `sweep-${batch.index}`,
+        sessionSuffix: batch.pass ? `sweep-${batch.index}p${batch.pass}` : `sweep-${batch.index}`,
         prompt: buildReviewPrompt(opts.base, opts.details, false, opts.steer, pr.ghRepo, {
           authorFamily: opts.authorFamily,
           ignoreGlobs: opts.ignoreGlobs,
@@ -378,7 +392,7 @@ async function runRecallSweep(opts: {
         model: REVIEW_MODELS.sweep,
         noFallback: true,
         branch: pr.headRef,
-        title: `${opts.title} · sweep ${batch.index}/${batches.length}`.slice(0, 100),
+        title: `${opts.title} · sweep ${batch.index}/${batches.length}${batch.pass ? ` p${batch.pass + 1}` : ""}`.slice(0, 100),
         // Each batch is its own context by construction; nothing to resume.
         resume: false,
         detached: false,
@@ -386,7 +400,7 @@ async function runRecallSweep(opts: {
       }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
       if (result.error) {
         console.warn(
-          `[github] review sweep batch ${batch.index}/${batches.length} on PR #${pr.number} failed: ${result.error}`,
+          `[github] review sweep batch ${batch.index}/${batches.length} pass ${batch.pass + 1} on PR #${pr.number} failed: ${result.error}`,
         );
       }
       const parsed = parseReviewOutput(result.text, opts.cwd);

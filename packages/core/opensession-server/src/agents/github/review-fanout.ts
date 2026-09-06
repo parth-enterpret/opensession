@@ -245,11 +245,44 @@ export const FANOUT = {
    * skips the sweep entirely.
    */
   maxBatches: 12,
+  /**
+   * How many times each batch runs. Two, on measurement, not taste.
+   *
+   * One commit, one configuration, run twice: the first pass matched two of
+   * four confirmed defects, the second matched a third, and the two shared
+   * nothing. Mean single pass 1.5 of 4; union of two 3 of 4. A third pass added
+   * nothing the first two had not already found, which is why this is 2 and not
+   * 3.
+   *
+   * The same shape shows up between the corpus's two commercial reviewers: on
+   * the 41 commits both reviewed they agree on at most 8 of 41 confirmed
+   * defects. Finding a defect is sampling, not checking a list, so coverage
+   * comes from sampling more rather than from prompting better.
+   *
+   * Cost is roughly 1.6x a single-pass review — the sweep is about 62% of the
+   * bill — which on Codex is well under a dollar. The real cost is noise, since
+   * a union inherits the false positives of both passes; that is what the
+   * precision rules in DEFAULT_REVIEW_PROMPT and dedupeFindings are for.
+   */
+  passes: 2,
   /** Batches in flight at once. The workflow runner already treats 8 parallel
    *  read-only agents as safe; reviews also run concurrently across PRs, so
    *  this stays well under that. */
   concurrency: 4,
 };
+
+/**
+ * One entry per (batch, pass). Ordered pass-major so the first pass over every
+ * batch completes before the second begins: a review that runs out of its
+ * deadline mid-stage then has full single-pass coverage rather than two passes
+ * over the first half of the diff and none over the rest.
+ */
+export function expandPasses<T>(batches: T[], passes: number): Array<T & { pass: number }> {
+  const n = Math.max(1, Math.floor(passes) || 1);
+  return Array.from({ length: n }, (_u, pass) =>
+    batches.map((b) => ({ ...b, pass })),
+  ).flat();
+}
 
 /**
  * Changed files and their churn, straight from the unified diff. `PrDetails.files`
