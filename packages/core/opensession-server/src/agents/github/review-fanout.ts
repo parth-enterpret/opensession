@@ -279,7 +279,18 @@ export const FANOUT = {
   /** Batches in flight at once. The workflow runner already treats 8 parallel
    *  read-only agents as safe; reviews also run concurrently across PRs, so
    *  this stays well under that. */
-  concurrency: 4,
+  /**
+   * Raised from 4 after measuring that nothing external throttles this: over a
+   * 20-case evaluation the GitHub budget stayed at 12500/12500, two rate-limit
+   * lines appeared in total, and host load sat at 0.27 on 4 cores. The sweep was
+   * ~85% of a review's wall clock purely because 34 batches were queued behind 4
+   * slots.
+   *
+   * Still at the 8 the workflow runner treats as safe for read-only agents. The
+   * old value assumed reviews run concurrently across PRs and shared the budget;
+   * when one review has the box to itself that assumption costs an hour a run.
+   */
+  concurrency: 8,
 };
 
 /**
