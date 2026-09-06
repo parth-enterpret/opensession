@@ -355,6 +355,7 @@ async function runRecallSweep(opts: {
   // Passes multiply noise as well as coverage, which is why they arrived
   // together with the precision work rather than before it.
   const queue = expandPasses(batches, FANOUT.passes);
+  const queue0 = queue.length;
   const found: Finding[] = [];
   let ran = 0;
   const startedAt = Date.now();
@@ -413,7 +414,7 @@ async function runRecallSweep(opts: {
   );
   const candidates = dedupeFindings(found);
   console.log(
-    `[github] review sweep on PR #${pr.number}: ${ran}/${batches.length} batches in ${Math.round((Date.now() - startedAt) / 1000)}s → ${found.length} candidates, ${candidates.length} after dedup`,
+    `[github] review sweep on PR #${pr.number}: ${ran}/${queue0} batches (${FANOUT.passes}x${batches.length}) in ${Math.round((Date.now() - startedAt) / 1000)}s → ${found.length} candidates, ${candidates.length} after dedup`,
   );
   return candidates;
 }
