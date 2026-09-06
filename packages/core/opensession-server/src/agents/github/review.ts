@@ -1108,13 +1108,20 @@ export async function runReview(
       pr.number ? String(pr.number) : pr.headRef,
       pr.ghRepo || undefined,
     );
-    if (
-      pr.headSha &&
-      latestPr?.headRefOid &&
-      latestPr.headRefOid !== pr.headSha
-    ) {
+    // Compare by prefix, not equality. Callers legitimately pass an abbreviated
+    // sha — git accepts one everywhere else, and the review runs correctly on
+    // it. A strict !== then discards a finished review because "2a8f7a9f9f" is
+    // not "2a8f7a9f9f291bfb605af2c4d6c411841b56af63", and the log line renders
+    // both through slice(0, 7), so the message reads "moved from 2a8f7a9 to
+    // 2a8f7a9". That cost one 25-minute run and nine assembled findings.
+    const headMoved =
+      !!pr.headSha &&
+      !!latestPr?.headRefOid &&
+      !latestPr.headRefOid.startsWith(pr.headSha) &&
+      !pr.headSha.startsWith(latestPr.headRefOid);
+    if (headMoved) {
       console.log(
-        `[github] PR #${pr.number} moved from ${pr.headSha.slice(0, 7)} to ${latestPr.headRefOid.slice(0, 7)} during review; discarding the stale result`,
+        `[github] PR #${pr.number} moved from ${pr.headSha} to ${latestPr!.headRefOid} during review; discarding the stale result`,
       );
       if (placeholderId) {
         await editIssueComment(
