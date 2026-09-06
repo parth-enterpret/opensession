@@ -101,6 +101,7 @@ import {
   priorReviewSection,
 } from "./review-context";
 import { learnedRulesSection } from "./learned-rules";
+import { learningsSection } from "./learnings";
 import { repoForFullName } from "./constants";
 
 const DEFAULT_REPO_DIR = defaultRepo().repo;
@@ -1011,7 +1012,13 @@ export async function runReview(
         steer,
         authorFamily: author?.family,
         ignoreGlobs: reviewOpts.ignoreGlobs,
-        learnedRules: learnedRulesSection(pr.ghRepo),
+        // Both channels, and the ordering is the point: learned-rules are distilled
+        // and injected without ever being measured, while learnings below them
+        // reached this prompt by moving a metric on replay. Keeping them separate
+        // rather than merging means the gated ones can be evaluated on their own,
+        // and the ungated channel can be retired once they have.
+        learnedRules: [learnedRulesSection(pr.ghRepo), learningsSection(pr.ghRepo, "review")]
+          .filter(Boolean).join("\n\n"),
         cancelled: cancellationRequested,
       });
       audit({
@@ -1131,7 +1138,13 @@ export async function runReview(
       intent: prIntentSection(details),
       discussion: prDiscussionSection(details, isGithubBotLogin, REVIEW_MARKER),
       priorReview,
-      learnedRules: learnedRulesSection(pr.ghRepo),
+      // Both channels, and the ordering is the point: learned-rules are distilled
+        // and injected without ever being measured, while learnings below them
+        // reached this prompt by moving a metric on replay. Keeping them separate
+        // rather than merging means the gated ones can be evaluated on their own,
+        // and the ungated channel can be retired once they have.
+        learnedRules: [learnedRulesSection(pr.ghRepo), learningsSection(pr.ghRepo, "review")]
+          .filter(Boolean).join("\n\n"),
       repoConventions: repoConventions(cwd),
       lastReviewedSha:
         isUpdate && state.lastReviewedSha && state.lastReviewedSha !== pr.headSha

@@ -84,9 +84,30 @@ function writeLearnings(file: LearningsFile, ghRepo?: string): void {
   writeJsonAtomic(storePath(ghRepo), { ...file, updatedAt: new Date().toISOString() });
 }
 
-/** Prompt section. Active learnings only — shadow ones are deliberately unused. */
+/**
+ * Prompt section. Active learnings only — shadow ones are deliberately unused.
+ *
+ * One exception, and it is the mechanism the replay gate is built on:
+ * `OPENSESSION_LEARNING_TRIAL=<id>` adds that one shadow learning for the
+ * duration of a run. Running the evaluation corpus with the variable unset and
+ * then set is the paired A/B the gate scores, and it is the only way a shadow
+ * learning can influence output at all.
+ *
+ * Deliberately an environment variable rather than a stored flag. A trial is a
+ * property of one measurement run, not of the learning, so it cannot leak into
+ * production by being left set in a file somebody forgot about.
+ */
 export function learningsSection(ghRepo?: string, domain = "review"): string {
-  const chosen = selectForPrompt(readLearnings(ghRepo).learnings, domain, repoKey(ghRepo));
+  const all = readLearnings(ghRepo).learnings;
+  const chosen = selectForPrompt(all, domain, repoKey(ghRepo));
+  const trialId = process.env.OPENSESSION_LEARNING_TRIAL;
+  if (trialId) {
+    const trial = all.find((l) => l.id === trialId && l.status === "shadow" && l.domain === domain);
+    if (trial && !chosen.some((l) => l.id === trial.id)) {
+      chosen.push(trial);
+      console.log(`[github] learning trial: ${trial.id} included for this run only`);
+    }
+  }
   if (!chosen.length) return "";
   const line = (l: Learning) => {
     const e = l.effect ? ` [measured: ${l.effect.metric} ${(100 * (l.effect.after - l.effect.before)).toFixed(0)}pt over ${l.effect.cases} cases]` : "";
