@@ -317,6 +317,102 @@ Do not write a PR summary: only \`findings\` is read from this run. Set \`verdic
  * defense kills a real finding exactly as badly as an invented finding wastes a
  * reviewer.
  */
+/**
+ * Stage 2b: which of these findings describe the SAME defect?
+ *
+ * `dedupeFindings` keys on `path:line` and on `path|normalized-title`, which
+ * catches two batches anchoring one claim identically and nothing else. Measured
+ * against audited duplicate pairs, only 27% share a file at all and their titles
+ * share a median 0.29 of words, so no refinement of a string key reaches them: a
+ * same-file-plus-overlap rule catches 1 of 11 while falsely merging 3 to 6
+ * distinct pairs.
+ *
+ * The duplicates are cross-file by nature. The worst case measured was one
+ * defect written up four times — at the reader, at each of two writers, and at
+ * the clear path — in four files, in four different sentences.
+ *
+ * They cost precision and nothing else: 32% of the unmatched findings in one
+ * audit, every one of them a claim whose defect was already reported elsewhere
+ * in the same review. Removing them cannot cost recall.
+ *
+ * Deliberately NOT an adjudication pass. One of those, holding
+ * DEFAULT_REVIEW_PROMPT's reporting bar over a whole list, cut 8 of 9 findings
+ * and is the reason stage 2 runs one verifier per candidate. This agent is never
+ * given the bar and is never asked what is worth posting. It answers one
+ * question about pairs of sentences, and its default is that they differ.
+ */
+export function buildDedupePrompt(findings: Array<{
+  id: string;
+  path: string;
+  line: number;
+  severity?: string;
+  title?: string;
+  body: string;
+}>): string {
+  return `You are grouping code-review findings that describe the SAME DEFECT.
+
+One review produced the findings below. Some of them are one defect written up
+more than once, at different places in the code. Your only job is to say which.
+
+## What counts as the same defect
+
+The same wrong behaviour, however differently it is anchored or worded. A single
+defect commonly appears as:
+
+- the place it is read and the place it is written
+- a definition and its call site
+- a helper and each of the callers that inherit its bug
+- one broken value described through two of its consequences
+
+A real case: one defect appeared four times — at the reader, at each of two
+writers, and at the code path that clears it. Four files, four different
+sentences, one fix.
+
+## What does NOT count
+
+Findings in the same function, on the same line, or on the same variable are
+routinely DIFFERENT defects. Measured on these repositories:
+
+- two distinct defects 26 lines apart in one function
+- two reviewers on one statement naming different wrong fields
+- two reviewers on one boolean flag needing disjoint fixes
+- one feature broken on two code paths, where fixing either leaves the other
+
+The test is the fix. If one change resolves both findings, they are the same
+defect. If each needs its own change, they are not — no matter how alike they
+read.
+
+## Bias
+
+Say they differ unless you are confident. A wrongly merged pair silently deletes
+a real finding and nobody sees it happen. A missed duplicate costs a reader one
+extra comment. Those are not equal errors.
+
+## The findings
+
+${findings.map((f) => `### ${f.id} — \`${f.path}:${f.line}\`${f.severity ? ` [${f.severity}]` : ""}
+${(f.title || "").trim()}
+${f.body.trim().slice(0, 400)}`).join("\n\n")}
+
+## Output
+
+One fenced \`json\` block, nothing after it. List only groups of two or more.
+Findings you do not list are kept as they are.
+
+\`\`\`json
+{
+  "groups": [
+    { "ids": ["B2", "B7"], "keep": "B2", "why": "one sentence naming the single shared defect and the one fix that resolves both" }
+  ]
+}
+\`\`\`
+
+\`keep\` must be one of the listed ids: the one a reader is best served landing
+on, which is usually where the fix goes rather than where the symptom shows.
+Omit \`groups\` entirely, or send an empty array, when nothing is duplicated —
+that is a common and correct answer.`;
+}
+
 export function buildVerifyPrompt(opts: {
   pr: PrDetails;
   candidate: { path: string; line: number; severity?: string; title?: string; body: string };

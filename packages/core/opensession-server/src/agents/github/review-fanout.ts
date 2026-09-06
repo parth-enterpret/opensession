@@ -455,6 +455,68 @@ export const VERIFY = {
 };
 
 /**
+ * Stage 2b's knobs. One agent over the finished list, not one per finding.
+ *
+ * It reads short sentences rather than code, so it is the cheapest stage in the
+ * review by a wide margin — the comparison is between findings, and it needs no
+ * checkout access at all.
+ */
+export const DEDUPE = {
+  /**
+   * Below this, skip the stage. Duplication needs volume to appear: the audited
+   * cases that carried duplicates posted 17 to 20 findings, while the ones
+   * posting 5 or fewer carried none. Paying an agent to compare four sentences
+   * that are visibly distinct is waste.
+   */
+  minFindings: 8,
+  /** One pass over a list of short strings. Generous; it should take seconds. */
+  timeoutMs: 3 * 60 * 1000,
+};
+
+/**
+ * Apply a dedupe verdict to a finding list.
+ *
+ * Pure, and separate from the agent that produces the verdict, because every
+ * failure mode here is silent: a group naming an id that does not exist, a
+ * `keep` outside its own group, one id in two groups, a model that decided
+ * everything is one defect. A wrongly merged pair deletes a real finding and
+ * nothing in the review says so.
+ *
+ * So every rule below fails closed — an unusable group is ignored and its
+ * findings are all kept, which costs a duplicate comment rather than a defect.
+ */
+export function applyDedupeGroups(
+  findings: Finding[],
+  groups: Array<{ ids?: string[]; keep?: string }>,
+  idOf: (f: Finding, i: number) => string = (_f, i) => `B${i}`,
+): { findings: Finding[]; merged: number } {
+  const byId = new Map(findings.map((f, i) => [idOf(f, i), f]));
+  const drop = new Set<string>();
+  const claimed = new Set<string>();
+  for (const g of groups || []) {
+    const ids = (g?.ids || []).filter((id) => byId.has(id));
+    // A group of one merges nothing. A group that lost members to a bad id is
+    // not the group the agent judged, so it is not acted on.
+    if (ids.length < 2 || ids.length !== (g?.ids || []).length) continue;
+    // One finding in two groups means the grouping is incoherent; skip the
+    // later one rather than guess which merge was intended.
+    if (ids.some((id) => claimed.has(id))) continue;
+    const keep = g?.keep && ids.includes(g.keep) ? g.keep : ids[0]!;
+    for (const id of ids) {
+      claimed.add(id);
+      if (id !== keep) drop.add(id);
+    }
+  }
+  // A verdict that collapses everything to one finding is a malfunction, not a
+  // review. Nothing measured comes close: the worst real case merged 4 of 20.
+  if (drop.size > findings.length / 2) return { findings, merged: 0 };
+  return {
+    findings: findings.filter((f, i) => !drop.has(idOf(f, i))),
+    merged: drop.size,
+  };
+}
+
+/**
  * Split candidates into the ones that get a verifier and the ones that do not.
  *
  * The overflow survives unverified. Dropping it would make recall depend on how

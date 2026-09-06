@@ -40,6 +40,8 @@ import {
   planHypothesisBatches,
   planReviewBatches,
   planVerifications,
+  applyDedupeGroups,
+  DEDUPE,
   expandPasses,
   REVIEW_MODELS,
   VERIFY,
@@ -49,6 +51,7 @@ import {
 import {
   buildHypothesisPrompt,
   buildReviewPrompt,
+  buildDedupePrompt,
   buildVerifyPrompt,
   DEFAULT_REVIEW_PROMPT,
 } from "./prompts";
@@ -448,6 +451,19 @@ export interface VerifyVerdict {
  * asymmetric in the direction we need: a stage-1 batch that fails already costs
  * us candidates outright, so a stage-2 failure must not cost us them twice.
  */
+/** Groups out of a dedupe turn. Anything unparseable means no merges. */
+export function parseDedupeOutput(text: string): Array<{ ids?: string[]; keep?: string }> {
+  const opener = (text || "").lastIndexOf("```json");
+  const json = extractBalancedJson(opener === -1 ? text || "" : text.slice(opener));
+  if (!json) return [];
+  try {
+    const o = JSON.parse(json);
+    return Array.isArray(o?.groups) ? o.groups : [];
+  } catch {
+    return [];
+  }
+}
+
 export function parseVerifyOutput(text: string, candidate: Finding): VerifyVerdict {
   const opener = (text || "").lastIndexOf("```json");
   const json = extractBalancedJson(opener === -1 ? text || "" : text.slice(opener));
@@ -1012,14 +1028,49 @@ export async function runReview(
             .map((r) => `${r.path}:${r.line} — ${r.title || "(untitled)"} — ${r.reason}`),
         });
 
+        // ── Stage 2b: collapse one defect written up several times ──
+        // Runs only when there is enough output for duplication to matter, and
+        // its verdict is applied by a pure function that fails closed. See
+        // buildDedupePrompt for why a string key cannot do this job.
+        let survivors = verified.survivors;
+        let mergedDupes = 0;
+        if (survivors.length >= DEDUPE.minFindings && !cancellationRequested()) {
+          const dedupeResult = await runGithubAgent({
+            prNumber: pr.number,
+            ghRepo: pr.ghRepo,
+            kind: "review",
+            sessionSuffix: "dedupe",
+            prompt: buildDedupePrompt(
+              survivors.map((f, i) => ({ id: `B${i}`, path: f.path, line: f.line,
+                                         severity: f.severity, title: f.title, body: f.body })),
+            ),
+            cwd,
+            mode: "ask",
+            model: REVIEW_MODELS.verify,
+            noFallback: true,
+            branch: pr.headRef,
+            title: `${title} · dedupe`.slice(0, 100),
+            resume: false,
+            detached: false,
+            timeoutMs: DEDUPE.timeoutMs,
+          }).catch((e): GithubRunResult => ({ bksId: "", text: "", error: String(e) }));
+          const applied = applyDedupeGroups(survivors, parseDedupeOutput(dedupeResult.text));
+          survivors = applied.findings;
+          mergedDupes = applied.merged;
+          console.log(
+            `[github] review dedupe on PR #${pr.number}: ${verified.survivors.length} findings → ${survivors.length} (${mergedDupes} merged)`,
+          );
+        }
+
         // ── Stage 3: deterministic assembly ──────────────────
-        assembled = assembleReview(verified.survivors, {
+        assembled = assembleReview(survivors, {
           changedFiles: details.changedFiles,
           changedLines: details.additions + details.deletions,
           batches: batches.length,
           candidates: candidates.length,
           refuted: verified.refuted.length,
         });
+        void mergedDupes;
         await progress(
           `${swept}, ${assembled.findings?.length || 0} verified — writing the review`,
         );
