@@ -248,11 +248,22 @@ export const FANOUT = {
   /**
    * How many times each batch runs. Two, on measurement, not taste.
    *
-   * One commit, one configuration, run twice: the first pass matched two of
-   * four confirmed defects, the second matched a third, and the two shared
-   * nothing. Mean single pass 1.5 of 4; union of two 3 of 4. A third pass added
-   * nothing the first two had not already found, which is why this is 2 and not
-   * 3.
+   * One commit, one configuration, four independent runs, all combinations:
+   *
+   *     passes   recall   posted   findings per confirmed defect
+   *        1       50%      10                 5.0
+   *        2       71%      20                 7.1
+   *        3       75%      30                10.0
+   *        4       75%      40                13.3
+   *
+   * Two passes take 71 of the 75 points available. The third buys four more for
+   * half again the noise and the fourth buys nothing, so 2 is where the curve
+   * turns, not a guess.
+   *
+   * Individual runs found {A0,A1}, {A2}, {A1,A2}, {A0,A1,A2} — one pair shares
+   * nothing at all. The 75% ceiling is one defect no run ever found, a `#`
+   * comment corrupting a masking scan; comments are a real gap and passes are
+   * not the fix for it.
    *
    * The same shape shows up between the corpus's two commercial reviewers: on
    * the 41 commits both reviewed they agree on at most 8 of 41 confirmed
