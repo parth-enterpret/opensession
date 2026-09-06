@@ -152,6 +152,22 @@ export const REVIEW_MODELS = {
    */
 
   /** One or two turns, no tools. Too small to matter; cheapest tier. */
+  /**
+   * The review that runs when the fan-out does not: diffs under
+   * `FANOUT.minFiles`, and the path taken when stage 1 yields nothing.
+   *
+   * It existed outside this map until it was measured. `review.ts` seeded its
+   * model from `config.model`, the server default, so every small pull request
+   * reviewed on Claude Sonnet while the three stages below ran on Codex. Over
+   * one 25-case eval a single 2-file review cost $6.25 against $12.46 for all
+   * 684 Codex sessions combined -- 33% of the bill from one run, at $0.078 per
+   * turn against $0.0015.
+   *
+   * Small pull requests are the common case in production, so the rule above
+   * was being broken on most real reviews and only held on the path anyone
+   * tested.
+   */
+  single: "gpt-5.6-luna",
   plan: "gpt-5.6-luna",
 
   /**

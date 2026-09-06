@@ -804,7 +804,11 @@ export async function runReview(
     // Model inversion: never review code with the model family that wrote it
     // (shared blind spots — see model-inversion.ts). Falls back to the
     // configured model for human-authored PRs.
-    let reviewModel = config.model;
+    // REVIEW_MODELS.single, not config.model. The three fan-out stages already
+    // name their own model; this path is the one that does not fan out, and
+    // seeding it from the server default sent every small pull request to
+    // Claude Sonnet at 52x the per-turn cost. See REVIEW_MODELS.single.
+    let reviewModel = REVIEW_MODELS.single;
     const inversion = inverseReviewModel(pr, reviewModel);
     if (inversion) {
       reviewModel = inversion.model;
