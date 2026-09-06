@@ -321,13 +321,20 @@ export const FANOUT = {
    * box to itself is not in that regime, and the sweep was still ~85% of wall
    * clock at 8.
    *
-   * The batches are independent read-only agents against separate files, so the
-   * only real ceiling is provider throughput. Watch for it rather than assume
-   * it: batch failures in the sweep log, or `N/M batches` coming back with N
-   * below M, mean this is too high and the extra parallelism is costing
-   * candidates rather than saving time.
+   * Then back to 8, because 16 was validated against the wrong signal.
+   *
+   * The check was batch shortfall and rate-limit lines, and both stayed clean.
+   * The binding constraint is neither: this host runs ONE Codex account, and at
+   * 16 concurrent batches over two passes plus a resample it was marked
+   * exhausted 90 seconds into a round, for an hour. Sweeps then return zero
+   * candidates and every review during the window is worthless.
+   *
+   * So the ceiling here is account throughput, not host load or GitHub budget —
+   * both of which looked idle throughout. Watch `[codex-accounts] ... marked
+   * exhausted` rather than the sweep log. 8 completed a full 15-case round
+   * without one; 16 did not survive a single case once a third pass existed.
    */
-  concurrency: 16,
+  concurrency: 8,
   /**
    * A sweep yielding fewer than `max(resampleFloor, batches * resamplePerBatch)`
    * candidates gets one more attempt. See sweepCameBackThin: the generator's
@@ -489,13 +496,11 @@ export const VERIFY = {
    * where a batch reads several whole, so its turns are shorter and the wave
    * finishes sooner.
    *
-   * Raised with FANOUT.concurrency for the same reason: the 4 and the 8 both
-   * came from a shared-box budget that assumed several reviews running at once
-   * across different PRs, and a review with the box to itself is not in that
-   * regime. Verify is ~150s of a review against the sweep's ~600, so this
-   * matters less, but it is the same mistake to leave in place.
+   * Held at 4 alongside FANOUT.concurrency's return to 8. One Codex account
+   * backs every stage, so verifier slots and sweep slots draw on the same
+   * budget, and the sweep is where the recall is.
    */
-  concurrency: 8,
+  concurrency: 4,
   /**
    * Hard ceiling on verifier runs per review. Candidates arrive severity-sorted
    * out of `dedupeFindings`, so anything past the ceiling is the least severe of
