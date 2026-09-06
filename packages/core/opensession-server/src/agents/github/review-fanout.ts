@@ -194,7 +194,27 @@ export const REVIEW_MODELS = {
    * measured recall of the two Codex tiers AND the lowest price, so nothing is
    * being traded away by preferring it.
    */
-  sweep: "gpt-5.6-luna",
+  /**
+   * Sol for the sweep, luna everywhere else, and the split is the point.
+   *
+   * Recall is decided here. The planner asks questions, the verifier refutes
+   * claims someone else wrote, and the deduper compares sentences — none of
+   * those generate a finding. Every defect the review reports was first noticed
+   * by a sweep batch, so a stronger model is worth its price at this stage and
+   * nowhere else.
+   *
+   * Sol had never been measured on recall before this. Every scored run in the
+   * evaluation to date was luna: 25,132 turns of it, against 80 turns of Sonnet
+   * that leaked in through the non-fanout path and were the reason
+   * REVIEW_MODELS.single exists.
+   *
+   * It is roughly 20x luna per input token, and the sweep is about 62% of a
+   * review's bill, so expect a luna review's $0.74 to become several dollars.
+   * That is the experiment: whether the recall ceiling is the model or the
+   * method. If luna at two passes and sol at two passes land in the same place,
+   * the ceiling is the method and the money is better spent elsewhere.
+   */
+  sweep: "gpt-5.6-sol",
 
   /**
    * Narrow refutation, one claim each.
