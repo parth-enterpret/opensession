@@ -33,9 +33,8 @@ The reporting bar — every one of these must hold, or the finding does not go o
 1. The author would fix it if they knew about it. Apply this test last and honestly; "technically true" fails it.
 2. It meaningfully affects correctness, security, data integrity, or material performance.
 3. It is discrete and actionable — one defect, one place, one fix — not a general concern about the codebase.
-4. You can state a concrete failure scenario: the inputs or state that trigger it, what the code then does, and the wrong outcome. Verified against the code on disk, not hypothesized.
-   And name where the trigger COMES FROM. This is the condition we fail most: an audit of our own findings labelled 23% speculative, and in every one the mechanism was real while nothing produced the input. "This breaks when the limit is below the personal allowance" with no tenant that configures that. "This breaks at 320px" on a desktop admin surface with no breakpoint handling. "This breaks when whitespace follows the dot" with no caller that emits it. Each is a true statement about the code and not a defect.
-   So before you write it: find the caller, the fixture, the schema, the config, or the user action that produces the triggering value, and say which. If you looked and could not find one, that is not a finding — unless the untrusted source is external input you can name, in which case say that instead. A mechanism nobody can reach is a property of the code, not a bug in it.
+4. You can state a concrete failure scenario: the inputs or state that trigger it, what the code then does, and the wrong outcome. Verified against the code on disk, not hypothesized. If it depends on a config value, input shape, or code path you have not confirmed exists here, cut it.
+   Say where the trigger comes from when you know — the caller, fixture, schema, config, or user action that produces the value. An audit found 23% of our findings had a real mechanism and nothing that produces the input, and naming the source is what separates the two. If you could not find the source, say so in the body and raise it anyway; a later pass decides. Do not silently present an unreachable mechanism as a defect.
 5. This PR introduced it, or this PR activates it, exposes it, or removes the guard on it. A defect that predates the PR and that the PR never reaches is out of scope.
 6. It is not an intentional choice. If it might be deliberate, ask the author to confirm rather than asserting it is broken.
 7. Fixing it demands no more rigor than the surrounding code already shows.
@@ -366,6 +365,8 @@ DROP it only when you can name the concrete reason the claim is wrong, and cite 
 - It is pre-existing AND this PR does not introduce, activate, expose, or remove the guard on it.
 - It is pure style, naming, formatting, or documentation, not a behavior bug.
 - It is a generic "missing X" ask (missing validation / rate limit / auth / error handling) with no concrete path where the omission produces a wrong outcome.
+- NOTHING PRODUCES THE TRIGGER. The mechanism is real and no caller, fixture, schema, config, or user action supplies the value that sets it off. This is distinct from the bullet above, which is about an input being blocked on the way in; this one is about an input that never exists. It was 23% of our findings in an audit — a limit below an allowance no tenant configures, a 320px viewport on a desktop-only admin surface, whitespace after a dot no caller emits. Each was a true statement about the code and not a defect.
+  You are the right stage to decide this and stage 1 is not: it sees a handful of files and was told to raise what it is unsure of, while you have the whole checkout. So go looking before you drop — grep the callers, the fixtures, the config. Drop only when you searched and found nothing, and say where you searched. If the source is external input you can name, that is a KEEP.
 
 KEEP is the default. Do NOT drop it merely because:
 - you are unsure, or you ran out of time to trace it — say what stopped you, and keep;
