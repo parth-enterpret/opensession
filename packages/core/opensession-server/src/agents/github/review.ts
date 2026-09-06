@@ -426,12 +426,24 @@ async function runRecallSweep(opts: {
   // that scored zero came from its low end, so this raises the floor rather
   // than the ceiling. Skipped when the deadline is gone — a resample that
   // cannot finish is worse than a thin review, because it returns nothing.
+  // Budget one more pass, not one more review. The first version of this guard
+  // asked for `githubRunTimeoutMs(0)` of remaining budget, which can never be
+  // true: the stage deadline is set to exactly that value at the start, so
+  // whatever has elapsed puts the remainder below it. With
+  // OPENSESSION_GITHUB_RUN_TIMEOUT_MS pinned at 45 minutes the function returns
+  // the same number for every argument, and the whole resample was dead code
+  // that fired on nothing.
+  //
+  // A resample is one more pass over the same batches, so price it at what one
+  // of the passes just cost, with a floor for a sweep that returned almost
+  // instantly.
   const deadlineLeft = deadline - Date.now();
+  const onePassMs = Math.max(60_000, (Date.now() - startedAt) / Math.max(1, FANOUT.passes));
   if (
     sweepCameBackThin(candidates.length, batches.length) &&
     !opts.cancelled() &&
     !isShuttingDown() &&
-    deadlineLeft > githubRunTimeoutMs(0)
+    deadlineLeft > onePassMs * 1.5
   ) {
     console.log(
       `[github] review sweep on PR #${pr.number}: ${candidates.length} candidates over ${batches.length} batches is thin — resampling once`,

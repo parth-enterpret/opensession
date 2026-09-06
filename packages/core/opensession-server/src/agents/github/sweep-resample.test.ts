@@ -43,3 +43,35 @@ describe("sweepCameBackThin", () => {
     expect(FANOUT.resampleAttempts).toBe(1);
   });
 });
+
+describe("the resample's time budget", () => {
+  // The first guard asked for githubRunTimeoutMs(0) of remaining budget. The
+  // stage deadline is set to exactly that at the start, so the remainder is
+  // always below it and the resample fired on nothing. These pin the arithmetic
+  // that replaced it: price a resample at one more pass, not one more review.
+  const budget = (elapsedMs: number, passes: number) =>
+    Math.max(60_000, elapsedMs / Math.max(1, passes));
+
+  test("one more pass is priced at what one pass just cost", () => {
+    // Two passes taking 200s together means one pass costs about 100s.
+    expect(budget(200_000, 2)).toBe(100_000);
+  });
+
+  test("a fast sweep still reserves a floor", () => {
+    // A sweep that returned in seconds must not conclude a resample is free.
+    expect(budget(4_000, 2)).toBe(60_000);
+  });
+
+  test("the guard is satisfiable, which the old one was not", () => {
+    // 45 minutes of stage budget, 200s spent: plenty of room for another pass.
+    const deadlineLeft = 45 * 60_000 - 200_000;
+    expect(deadlineLeft > budget(200_000, 2) * 1.5).toBe(true);
+    // The old condition, for contrast: deadlineLeft > the full stage timeout.
+    expect(deadlineLeft > 45 * 60_000).toBe(false);
+  });
+
+  test("a nearly exhausted stage does not start a resample it cannot finish", () => {
+    const deadlineLeft = 30_000;
+    expect(deadlineLeft > budget(200_000, 2) * 1.5).toBe(false);
+  });
+});
