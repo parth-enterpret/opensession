@@ -52,22 +52,42 @@ describe("applyDedupeGroups", () => {
     expect(r.merged).toBe(1);
   });
 
-  test("a verdict collapsing more than half the review is rejected wholesale", () => {
-    // An adjudication pass once cut 8 of 9 findings. The worst real duplicate
-    // group measured merged 4 of 20, so anything past half is a malfunction.
-    // Four findings into one drops three, which is past half; three into one
-    // drops two of four, which is not, and the next test pins that boundary.
+  test("one group swallowing the review is rejected wholesale", () => {
+    // The failure this guards against has a specific shape: the adjudication
+    // pass that cut 8 of 9 findings did it as ONE group.
     const r = applyDedupeGroups(list, [{ ids: ["B0", "B1", "B2", "B3"], keep: "B0" }]);
     expect(r).toEqual({ findings: list, merged: 0 });
   });
 
-  test("merging exactly half is still allowed", () => {
-    const r = applyDedupeGroups(list, [
-      { ids: ["B0", "B1"], keep: "B0" },
-      { ids: ["B2", "B3"], keep: "B2" },
+  test("many small groups are allowed even when they merge most of the list", () => {
+    // The first guard rejected any verdict merging past half, and threw away a
+    // correct one the first time a high-volume review arrived: 11 groups
+    // merging 27 of 53, rejected by a single finding, so the review that most
+    // needed deduplication got none.
+    const big = Array.from({ length: 12 }, (_u, i) => f(i));
+    const groups = [0, 2, 4, 6, 8, 10].map((i) => ({ ids: [`B${i}`, `B${i + 1}`], keep: `B${i}` }));
+    const r = applyDedupeGroups(big, groups);
+    expect(r.merged).toBe(6);
+    expect(r.findings).toHaveLength(6);
+  });
+
+  test("the widest group is what is checked, not the total merged", () => {
+    const big = Array.from({ length: 12 }, (_u, i) => f(i));
+    // Five wide is past a third of twelve; the small group alongside it does not
+    // rescue the verdict, because the wide one is the malfunction signature.
+    const r = applyDedupeGroups(big, [
+      { ids: ["B0", "B1", "B2", "B3", "B4"], keep: "B0" },
+      { ids: ["B6", "B7"], keep: "B6" },
     ]);
+    expect(r.merged).toBe(0);
+  });
+
+  test("a short list still allows a group of three", () => {
+    // max(3, n/3) keeps small reviews usable: three findings on one defect is
+    // ordinary, and a third of four would forbid it.
+    const r = applyDedupeGroups(list, [{ ids: ["B0", "B1", "B2"], keep: "B0" }]);
     expect(r.merged).toBe(2);
-    expect(ids(r)).toEqual(["t0", "t2"]);
+    expect(ids(r)).toEqual(["t0", "t3"]);
   });
 
   test("an empty finding list survives any verdict", () => {

@@ -195,26 +195,35 @@ export const REVIEW_MODELS = {
    * being traded away by preferring it.
    */
   /**
-   * Sol for the sweep, luna everywhere else, and the split is the point.
+   * Luna, and sol was measured rather than assumed.
    *
-   * Recall is decided here. The planner asks questions, the verifier refutes
-   * claims someone else wrote, and the deduper compares sentences — none of
-   * those generate a finding. Every defect the review reports was first noticed
-   * by a sweep batch, so a stronger model is worth its price at this stage and
-   * nowhere else.
+   * Recall is decided here — the planner asks questions, the verifier refutes
+   * claims someone else wrote, the deduper compares sentences, and none of them
+   * generate a finding. So this is the one stage where a stronger model could
+   * pay for itself, and it was tried on exactly that basis.
    *
-   * Sol had never been measured on recall before this. Every scored run in the
-   * evaluation to date was luna: 25,132 turns of it, against 80 turns of Sonnet
-   * that leaked in through the non-fanout path and were the reason
-   * REVIEW_MODELS.single exists.
+   * On the two cases run against every configuration:
    *
-   * It is roughly 20x luna per input token, and the sweep is about 62% of a
-   * review's bill, so expect a luna review's $0.74 to become several dollars.
-   * That is the experiment: whether the recall ceiling is the model or the
-   * method. If luna at two passes and sol at two passes land in the same place,
-   * the ceiling is the method and the money is better spent elsewhere.
+   *     arm        recall   posted   posted per hit   $/review
+   *     baseline    2/7       26         13.0          0.74
+   *     luna        6/7       25          4.2          ~1.20
+   *     sol         6/7       63         10.5         ~32
+   *
+   * Identical recall, 2.5x the findings, 44x the cost. Sol generated far more
+   * candidates — 75 against luna's 39 on one commit — and none of the extra
+   * converted into a confirmed defect.
+   *
+   * It also broke the stages sized for luna's volume. VERIFY.max is 12, so 40 of
+   * 52 candidates skipped refutation entirely and 0 were refuted; the deduper
+   * was handed 53 findings and its verdict was thrown out by a guard calibrated
+   * on smaller reviews. A stronger model is not a drop-in: everything
+   * downstream is sized for what the sweep produces.
+   *
+   * The conclusion the experiment was built to reach: the recall ceiling is the
+   * method, not the model. Two passes of luna reach what one pass of a model
+   * twenty times its price reaches, and the money belongs in the method.
    */
-  sweep: "gpt-5.6-sol",
+  sweep: "gpt-5.6-luna",
 
   /**
    * Narrow refutation, one claim each.
@@ -538,9 +547,23 @@ export function applyDedupeGroups(
       if (id !== keep) drop.add(id);
     }
   }
-  // A verdict that collapses everything to one finding is a malfunction, not a
-  // review. Nothing measured comes close: the worst real case merged 4 of 20.
-  if (drop.size > findings.length / 2) return { findings, merged: 0 };
+  // Guard on the largest GROUP, not the total merged.
+  //
+  // The first version rejected any verdict merging more than half the list, on
+  // the evidence that the worst case seen merged 4 of 20. That was calibrated on
+  // low-volume reviews and it threw away a correct verdict the first time a
+  // high-volume one arrived: 11 groups merging 27 of 53 findings, rejected for
+  // being one finding over the line, so nothing was deduplicated at all on the
+  // review that needed it most.
+  //
+  // Many small groups is what working deduplication looks like when a sweep
+  // repeats itself. The failure this guard exists for has a different shape
+  // entirely — the adjudication pass that cut 8 of 9 findings did it as ONE
+  // group — so size the check on the widest group rather than the total.
+  const widest = Math.max(0, ...[...claimed].length ? groups
+    .filter((g) => (g?.ids || []).every((id) => byId.has(id)))
+    .map((g) => (g?.ids || []).length) : [0]);
+  if (widest > Math.max(3, findings.length / 3)) return { findings, merged: 0 };
   return {
     findings: findings.filter((f, i) => !drop.has(idOf(f, i))),
     merged: drop.size,
