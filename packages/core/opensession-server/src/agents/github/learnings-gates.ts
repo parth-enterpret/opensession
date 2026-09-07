@@ -119,6 +119,20 @@ export const STALE_AFTER_MS = 60 * 24 * 60 * 60 * 1000;
  *  Our own arms differed by one finding in 44 across a whole configuration
  *  change, so anything smaller cannot be attributed to one learning. */
 export const MIN_EFFECT = 0.02;
+/** A replay smaller than this cannot settle the question either way, so an
+ *  inconclusive result at this size is a reason to measure again rather than a
+ *  verdict. Our own first replay ran four cases and moved recall by zero
+ *  points; that says the sample was too small, not that the learning is inert. */
+export const REPLAY_MIN_CASES = 12;
+
+/** Was this measurement large enough for its inconclusive result to mean
+ *  anything? A regression or an improvement stands at any size — only the
+ *  "inside noise" verdict depends on how much was measured. */
+export function replayIsUnderpowered(effect: LearningEffect | undefined): boolean {
+  if (!effect) return false;
+  const delta = effect.after - effect.before;
+  return Math.abs(delta) < MIN_EFFECT && effect.cases < REPLAY_MIN_CASES;
+}
 
 const now = () => new Date().toISOString();
 
@@ -206,8 +220,10 @@ export function gateReplay(effect: LearningEffect | undefined): GateResult {
   const delta = effect.after - effect.before;
   if (delta < -MIN_EFFECT)
     return mk("fail", `${effect.metric} fell ${(-delta * 100).toFixed(1)} points over ${effect.cases} cases`);
-  if (delta < MIN_EFFECT)
-    return mk("skip", `${effect.metric} moved ${(delta * 100).toFixed(1)} points over ${effect.cases} cases — inside noise`);
+  if (delta < MIN_EFFECT) {
+    const short = effect.cases < REPLAY_MIN_CASES ? ` — inside noise on too few cases, needs ${REPLAY_MIN_CASES}` : " — inside noise";
+    return mk("skip", `${effect.metric} moved ${(delta * 100).toFixed(1)} points over ${effect.cases} cases${short}`);
+  }
   return mk("pass", `${effect.metric} rose ${(delta * 100).toFixed(1)} points over ${effect.cases} cases`);
 }
 

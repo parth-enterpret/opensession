@@ -41,7 +41,7 @@ import { repoForFullName } from "./constants";
 import { readFeedback } from "./feedback";
 import { isNegativeSignal, isPositiveSignal, type FeedbackRecord } from "./feedback-gates";
 import {
-  decideStatus, gateReplay, runStaticGates, selectForPrompt,
+  decideStatus, gateReplay, replayIsUnderpowered, runStaticGates, selectForPrompt,
   MAX_TEXT, MIN_DISTINCT_PRS, MIN_SIGNALS,
   type GateResult, type Learning, type LearningEffect, type LearningProvenance,
 } from "./learnings-gates";
@@ -329,7 +329,8 @@ export function recordEffect(id: string, effect: LearningEffect, ghRepo?: string
 /** Learnings waiting on a measurement, oldest first. What the replay runs next. */
 export function pendingReplay(ghRepo?: string, domain = "review"): Learning[] {
   return readLearnings(ghRepo).learnings
-    .filter((l) => l.status === "shadow" && l.domain === domain && !l.effect)
+    .filter((l) => l.status === "shadow" && l.domain === domain
+      && (!l.effect || replayIsUnderpowered(l.effect)))
     .sort((a, b) => (a.provenance.createdAt || "").localeCompare(b.provenance.createdAt || ""));
 }
 

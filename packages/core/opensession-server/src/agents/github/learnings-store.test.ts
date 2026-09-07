@@ -126,9 +126,23 @@ describe("pendingReplay", () => {
   });
 
   test("a measured shadow learning is not re-queued", () => {
-    // It moved the metric by less than the noise floor. Measuring it again
-    // spends an evaluation run to learn the same thing.
+    // It moved the metric by less than the noise floor over a run big enough to
+    // say so. Measuring it again spends an evaluation run to learn the same thing.
     seed([learning({ status: "shadow", effect: { metric: "recall", before: 0.5, after: 0.501, cases: 18, at: "" } })]);
+    expect(pendingReplay()).toEqual([]);
+  });
+
+  test("a null result on too few cases IS re-queued", () => {
+    // The counterpart to the test above, and the reason it names a case count.
+    // Our first live replay went 9/13 to 9/13 over four cases. Treating that as
+    // a verdict leaves the learning in shadow forever, and shadow never reaches
+    // a prompt — the learning would be neither used nor ever re-examined.
+    seed([learning({ status: "shadow", effect: { metric: "recall", before: 0.6923, after: 0.6923, cases: 4, at: "" } })]);
+    expect(pendingReplay().map((l) => l.id)).toEqual(["L1"]);
+  });
+
+  test("a demoted learning is never re-queued, however small the run", () => {
+    seed([learning({ status: "demoted", effect: { metric: "recall", before: 0.55, after: 0.40, cases: 2, at: "" } })]);
     expect(pendingReplay()).toEqual([]);
   });
 });

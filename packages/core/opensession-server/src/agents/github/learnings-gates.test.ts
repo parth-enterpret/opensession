@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   decideStatus, gateConsistent, gateReplay, gateSupported, gateWellFormed,
-  runStaticGates, selectForPrompt, MAX_ACTIVE, MIN_EFFECT, STALE_AFTER_MS,
+  replayIsUnderpowered, runStaticGates, selectForPrompt,
+  MAX_ACTIVE, MIN_EFFECT, REPLAY_MIN_CASES, STALE_AFTER_MS,
   type Learning, type LearningEffect,
 } from "./learnings-gates";
 
@@ -123,6 +124,49 @@ describe("replay — the gate that costs money", () => {
     // "not yet measured" and "measured and useless" are different states, and
     // only the second should block a learning forever.
     expect(gateReplay(undefined).status).toBe("skip");
+  });
+
+  test("a null result on too few cases says so in the detail", () => {
+    // The first real replay this system ran covered four cases and moved recall
+    // by exactly zero points. That is a statement about the sample, not the
+    // learning, and the detail has to say which.
+    const small = { metric: "recall", before: 0.6923, after: 0.6923, cases: 4, at: "" };
+    const r = gateReplay(small);
+    expect(r.status).toBe("skip");
+    expect(r.detail).toContain("too few cases");
+  });
+});
+
+describe("replayIsUnderpowered — when a null result should be re-measured", () => {
+  const at = new Date().toISOString();
+
+  test("a null result on too few cases is re-queued", () => {
+    // Without this, one small inconclusive run parks a learning in shadow
+    // forever, and shadow learnings never reach a prompt. That is a trap door,
+    // not a decision.
+    expect(replayIsUnderpowered(
+      { metric: "recall", before: 0.6923, after: 0.6923, cases: 4, at })).toBe(true);
+  });
+
+  test("a null result on enough cases is a verdict, not a re-run", () => {
+    expect(replayIsUnderpowered(
+      { metric: "recall", before: 0.5, after: 0.5, cases: REPLAY_MIN_CASES, at })).toBe(false);
+  });
+
+  test("a regression stands at any sample size", () => {
+    // A learning that made the reviewer worse does not get a second chance on
+    // the grounds that the run was small.
+    expect(replayIsUnderpowered(
+      { metric: "recall", before: 0.55, after: 0.40, cases: 2, at })).toBe(false);
+  });
+
+  test("an improvement stands at any sample size", () => {
+    expect(replayIsUnderpowered(
+      { metric: "recall", before: 0.40, after: 0.55, cases: 2, at })).toBe(false);
+  });
+
+  test("no measurement is not underpowered — it is unmeasured", () => {
+    expect(replayIsUnderpowered(undefined).valueOf()).toBe(false);
   });
 });
 
